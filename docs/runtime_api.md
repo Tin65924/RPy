@@ -1,155 +1,478 @@
-RPy Runtime API Reference
-==========================
+# RPy Runtime API Reference
 
-The RPy runtime library (python_runtime.lua) provides helper functions
-that emulate Python semantics in Luau. Only helpers that are actually
-used get imported via `require(script.Parent.python_runtime)`.
+The **RPy runtime library** (`python_runtime.lua`) provides helper functions that emulate **Python semantics in Luau**.
 
+Only helpers that are actually required by the transpiled code are imported:
 
-Core Helpers
-------------
+```lua
+local py = require(script.Parent.python_runtime)
+```
 
-py_bool(value) → boolean
-    Python truthiness: 0, "", nil, false, empty list/dict → false.
-    Everything else → true.
+The runtime exposes a set of `py_*` helper functions used to replicate Python behavior.
 
-py_range(start, stop, step) → table
-    Returns a list of numbers [start, start+step, ...] up to (but not
-    including) stop.
+---
 
-py_len(obj) → number
-    Returns #obj (table length).
+# Core Helpers
 
-py_str(value) → string
-    Converts value to string via tostring().
+### `py_bool(value) → boolean`
 
-py_int(value) → number
-    Converts value to integer via tonumber() + math.floor().
+Implements **Python truthiness rules**.
 
-py_float(value) → number
-    Converts value to number via tonumber().
+Returns `false` for:
 
-py_contains(container, value) → boolean
-    Checks if value is in container (list or dict key).
+* `0`
+* `""`
+* `nil`
+* `false`
+* empty lists `{}`
 
-py_print(...) → nil
-    Multi-argument print with space separator.
+Returns `true` for everything else.
 
+---
 
-List Helpers
-------------
+### `py_range(start, stop, step) → table`
 
-py_append(list, value) → nil
-    Appends value to end of list.
+Returns a numeric sequence similar to Python's `range()`.
 
-py_pop(list, index?) → any
-    Removes and returns item at index (default: last).
+Example:
 
-py_insert(list, index, value) → nil
-    Inserts value at index.
+```python
+range(0, 5, 1)
+```
 
-py_remove(list, value) → nil
-    Removes first occurrence of value.
+Produces:
 
-py_index_of(list, value) → number
-    Returns 0-based index of first occurrence.
+```lua
+{0, 1, 2, 3, 4}
+```
 
-py_sort(list) → nil
-    Sorts list in place.
+The `stop` value is **exclusive**.
 
-py_reverse(list) → nil
-    Reverses list in place.
+---
 
-py_extend(list, other) → nil
-    Appends all elements of other to list.
+### `py_len(obj) → number`
 
-py_copy(list) → table
-    Returns a shallow copy.
+Returns the length of a table.
 
-py_count(list, value) → number
-    Counts occurrences of value.
+```lua
+py_len(obj) -- equivalent to #obj
+```
 
-py_index(list, i) → any
-    Handles negative indexing: list[py_index(list, -1)] → last item.
+---
 
-py_slice(list, start, stop, step) → table
-    Returns a sliced copy.
+### `py_str(value) → string`
 
+Converts a value to a string.
 
-Dict Helpers
-------------
+```lua
+py_str(value) -- internally uses tostring()
+```
 
-py_keys(dict) → table
-    Returns list of keys.
+---
 
-py_values(dict) → table
-    Returns list of values.
+### `py_int(value) → number`
 
-py_items(dict) → table
-    Returns list of {key, value} pairs.
+Converts a value to an integer.
 
-py_get(dict, key, default?) → any
-    Returns dict[key] or default (nil if omitted).
+```lua
+math.floor(tonumber(value))
+```
 
-py_update(dict, other) → nil
-    Merges other into dict.
+---
 
-py_setdefault(dict, key, default?) → any
-    Returns dict[key], setting it to default if missing.
+### `py_float(value) → number`
 
+Converts a value to a number.
 
-String Helpers
---------------
+```lua
+tonumber(value)
+```
 
-py_split(str, sep?) → table
-    Splits string by separator (default: whitespace).
+---
 
-py_join(sep, list) → string
-    Joins list elements with separator.
+### `py_contains(container, value) → boolean`
 
-py_strip(str) → string
-    Removes leading/trailing whitespace.
+Checks if a value exists in a container.
 
-py_lstrip(str) → string
-    Removes leading whitespace.
+Supported containers:
 
-py_rstrip(str) → string
-    Removes trailing whitespace.
+* lists
+* dictionary keys
 
-py_upper(str) → string
-    Returns uppercase version.
+Equivalent to Python's:
 
-py_lower(str) → string
-    Returns lowercase version.
+```python
+value in container
+```
 
-py_replace(str, old, new) → string
-    Replaces all occurrences of old with new.
+---
 
-py_find(str, sub) → number
-    Returns 0-based index of substring, or -1.
+### `py_print(...) → nil`
 
-py_startswith(str, prefix) → boolean
-    Tests if string starts with prefix.
+Python-style multi-argument printing.
 
-py_endswith(str, suffix) → boolean
-    Tests if string ends with suffix.
+Arguments are joined with spaces.
 
+Example:
 
-Utility Helpers
----------------
+```python
+print("hello", 5)
+```
 
-py_sorted(list) → table
-    Returns a new sorted list (does not modify original).
+Produces:
 
-py_enumerate(list, start?) → table
-    Returns list of {index, value} pairs (start defaults to 0).
+```
+hello 5
+```
 
-py_zip(a, b, ...) → table
-    Returns list of tuples from parallel iterables.
+---
 
-py_reversed(list) → table
-    Returns a new reversed list.
+# List Helpers
 
-py_format(value, spec) → string
-    Formats value according to Python-style format spec.
-    e.g. py_format(3.14159, ".2f") → "3.14"
+### `py_append(list, value)`
+
+Appends a value to the end of a list.
+
+```python
+list.append(value)
+```
+
+---
+
+### `py_pop(list, index?) → any`
+
+Removes and returns an element.
+
+* Default: last element
+
+Example:
+
+```python
+list.pop()
+list.pop(2)
+```
+
+---
+
+### `py_insert(list, index, value)`
+
+Inserts a value at a given index.
+
+---
+
+### `py_remove(list, value)`
+
+Removes the **first occurrence** of a value.
+
+---
+
+### `py_index_of(list, value) → number`
+
+Returns the **0-based index** of the first occurrence.
+
+---
+
+### `py_sort(list)`
+
+Sorts the list **in place**.
+
+---
+
+### `py_reverse(list)`
+
+Reverses the list **in place**.
+
+---
+
+### `py_extend(list, other)`
+
+Appends all elements from `other`.
+
+Equivalent to:
+
+```python
+list.extend(other)
+```
+
+---
+
+### `py_copy(list) → table`
+
+Returns a **shallow copy** of the list.
+
+---
+
+### `py_count(list, value) → number`
+
+Counts occurrences of a value.
+
+---
+
+### `py_index(list, i) → any`
+
+Handles **negative indexing**.
+
+Example:
+
+```python
+list[-1]
+```
+
+Equivalent Luau usage:
+
+```lua
+list[py_index(list, -1)]
+```
+
+---
+
+### `py_slice(list, start, stop, step) → table`
+
+Returns a **sliced copy** of a list.
+
+Example:
+
+```python
+list[1:5:2]
+```
+
+---
+
+# Dictionary Helpers
+
+### `py_keys(dict) → table`
+
+Returns a list of dictionary keys.
+
+Equivalent to:
+
+```python
+dict.keys()
+```
+
+---
+
+### `py_values(dict) → table`
+
+Returns a list of dictionary values.
+
+Equivalent to:
+
+```python
+dict.values()
+```
+
+---
+
+### `py_items(dict) → table`
+
+Returns `{key, value}` pairs.
+
+Equivalent to:
+
+```python
+dict.items()
+```
+
+---
+
+### `py_get(dict, key, default?) → any`
+
+Returns a value or a default.
+
+Example:
+
+```python
+dict.get("a", 0)
+```
+
+---
+
+### `py_update(dict, other)`
+
+Merges `other` into `dict`.
+
+Equivalent to:
+
+```python
+dict.update(other)
+```
+
+---
+
+### `py_setdefault(dict, key, default?) → any`
+
+Returns the value for a key.
+
+If the key does not exist, it is inserted with `default`.
+
+Equivalent to:
+
+```python
+dict.setdefault(key, default)
+```
+
+---
+
+# String Helpers
+
+### `py_split(str, sep?) → table`
+
+Splits a string into a list.
+
+Default separator: **whitespace**
+
+Example:
+
+```python
+"hello world".split()
+```
+
+---
+
+### `py_join(sep, list) → string`
+
+Joins list elements using a separator.
+
+Example:
+
+```python
+",".join(list)
+```
+
+---
+
+### `py_strip(str) → string`
+
+Removes leading and trailing whitespace.
+
+---
+
+### `py_lstrip(str) → string`
+
+Removes leading whitespace.
+
+---
+
+### `py_rstrip(str) → string`
+
+Removes trailing whitespace.
+
+---
+
+### `py_upper(str) → string`
+
+Returns an uppercase version.
+
+---
+
+### `py_lower(str) → string`
+
+Returns a lowercase version.
+
+---
+
+### `py_replace(str, old, new) → string`
+
+Replaces all occurrences of a substring.
+
+---
+
+### `py_find(str, sub) → number`
+
+Returns the **0-based index** of a substring.
+
+Returns `-1` if not found.
+
+---
+
+### `py_startswith(str, prefix) → boolean`
+
+Checks if the string begins with `prefix`.
+
+---
+
+### `py_endswith(str, suffix) → boolean`
+
+Checks if the string ends with `suffix`.
+
+---
+
+# Utility Helpers
+
+### `py_sorted(list) → table`
+
+Returns a **new sorted list**.
+
+Does **not modify the original list**.
+
+Equivalent to:
+
+```python
+sorted(list)
+```
+
+---
+
+### `py_enumerate(list, start?) → table`
+
+Returns `{index, value}` pairs.
+
+Default start index: `0`.
+
+Example:
+
+```python
+enumerate(list)
+```
+
+---
+
+### `py_zip(a, b, ...) → table`
+
+Combines multiple iterables into tuples.
+
+Example:
+
+```python
+zip(a, b)
+```
+
+Produces:
+
+```lua
+{
+    {a1, b1},
+    {a2, b2},
+}
+```
+
+---
+
+### `py_reversed(list) → table`
+
+Returns a **new reversed list**.
+
+Equivalent to:
+
+```python
+reversed(list)
+```
+
+---
+
+### `py_format(value, spec) → string`
+
+Formats values using Python-style format specifiers.
+
+Example:
+
+```lua
+py_format(3.14159, ".2f")
+```
+
+Result:
+
+```
+"3.14"
+```
