@@ -12,7 +12,7 @@
 ## 1. Clone the repository
 
 ```powershell
-git clone <repo-url>
+git clone <https://github.com/Tin65924/RPy>
 cd RPy
 ```
 
@@ -75,7 +75,7 @@ RPy/
 │   ├── unit/        # Per-AST-node unit tests
 │   └── integration/ # Full .py → .lua golden tests
 ├── examples/        # Sample Python game scripts
-└── docs/            # supported_subset.txt, semantic_map.txt, runtime_api.txt
+└── docs/            # supported_subset.md, semantic_map.md, runtime_api.md
 ```
 
 ## 7. Running a specific test file

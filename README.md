@@ -133,9 +133,9 @@ RPy/
 
 ## Documentation
 
-- [`docs/supported_subset.txt`](docs/supported_subset.txt) — Exact Python feature list
-- [`docs/semantic_map.txt`](docs/semantic_map.txt) — Python → Luau mapping reference
-- [`docs/runtime_api.txt`](docs/runtime_api.txt) — Runtime helper function signatures
+- [`docs/supported_subset.md`](docs/supported_subset.md) — Exact Python feature list
+- [`docs/semantic_map.md`](docs/semantic_map.md) — Python → Luau mapping reference
+- [`docs/runtime_api.md`](docs/runtime_api.md) — Runtime helper function signatures
 
 ## License
 
