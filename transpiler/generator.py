@@ -29,6 +29,7 @@ from transpiler.ast_utils import (
 )
 from transpiler.transformer import TransformResult, ScopeMap, ImportInfo
 from transpiler.type_inferrer import TypeMap, infer_types
+from transpiler.node_registry import get_statement_handler, get_expression_handler
 
 # ---------------------------------------------------------------------------
 # Compiler flags (mirrors CLI flags)
@@ -193,6 +194,19 @@ class LuauGenerator(ast.NodeVisitor):
     # Entry point
     # -----------------------------------------------------------------------
 
+    def visit(self, node: ast.AST) -> None:
+        """Custom visitor that prefers registry over methods."""
+        # Registry (Phase 14 refactor)
+        try:
+            handler = get_statement_handler(node)
+            handler(node, self.ctx)
+            return
+        except UnsupportedFeatureError:
+            pass
+        
+        # Fallback to standard visit_* methods
+        super().visit(node)
+
     def visit_Module(self, node: ast.Module) -> None:
         for stmt in node.body:
             self.visit(stmt)
@@ -203,6 +217,15 @@ class LuauGenerator(ast.NodeVisitor):
 
     def expr(self, node: ast.expr) -> str:
         """Dispatch an expression node; always returns a string."""
+        # Check registry first (Phase 14 refactor)
+        try:
+            handler = get_expression_handler(node)
+            res = handler(node, self.ctx)
+            return res if res is not None else ""
+        except UnsupportedFeatureError:
+            pass
+
+        # Fallback to method-driven dispatch
         method = f"_expr_{type(node).__name__}"
         handler = getattr(self, method, None)
         if handler is None:

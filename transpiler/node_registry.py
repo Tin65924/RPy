@@ -100,6 +100,9 @@ def get_statement_handler(node: ast.AST) -> HandlerFn:
 
     Raises UnsupportedFeatureError if no handler is registered.
     """
+    if not _STATEMENT_HANDLERS:
+        register_handlers()
+
     t = type(node)
     handler = _STATEMENT_HANDLERS.get(t)
     if handler is None:
@@ -117,6 +120,9 @@ def get_expression_handler(node: ast.AST) -> HandlerFn:
 
     Raises UnsupportedFeatureError if no handler is registered.
     """
+    if not _EXPRESSION_HANDLERS:
+        register_handlers()
+
     t = type(node)
     handler = _EXPRESSION_HANDLERS.get(t)
     if handler is None:
@@ -139,12 +145,13 @@ def list_registered() -> dict[str, list[str]]:
     }
 
 
-# ---------------------------------------------------------------------------
-# Phase 4+ handlers will be imported and registered here via:
-#   from transpiler import handlers   (which uses @statement / @expression)
-# ---------------------------------------------------------------------------
-# This import is conditional so the registry is usable before handlers exist.
-try:
+def register_handlers() -> None:
+    """
+    Explicitly import and register handlers to the system.
+    This ensures that the @statement and @expression decorators are executed.
+    """
     import transpiler.handlers  # noqa: F401  # registers via decorators
-except ModuleNotFoundError:
-    pass  # handlers module is created in Phase 4
+
+
+# Register on import
+register_handlers()

@@ -276,20 +276,20 @@ class TestNeedsBoolShim:
 
 class TestNodeRegistry:
     def test_register_and_retrieve_statement(self):
-        @statement(ast.Pass)
-        def _handle_pass(node, ctx):
-            return "-- pass"
+        @statement(ast.Nonlocal)
+        def _handle_nonlocal(node, ctx):
+            return "-- nonlocal"
 
-        handler = get_statement_handler(ast.Pass())
-        assert handler(ast.Pass(), None) == "-- pass"  # type: ignore[arg-type]
+        handler = get_statement_handler(ast.Nonlocal(names=[]))
+        assert handler(ast.Nonlocal(names=[]), None) == "-- nonlocal"  # type: ignore[arg-type]
 
     def test_register_and_retrieve_expression(self):
-        @expression(ast.Starred)
-        def _handle_starred(node, ctx):
+        @expression(ast.Await)
+        def _handle_await(node, ctx):
             return "..."
 
-        handler = get_expression_handler(ast.Starred())
-        assert handler(ast.Starred(), None) == "..."  # type: ignore[arg-type]
+        handler = get_expression_handler(ast.Await(value=ast.Constant(value=None)))
+        assert handler(ast.Await(value=ast.Constant(value=None)), None) == "..."  # type: ignore[arg-type]
 
     def test_missing_statement_raises_unsupported(self):
         # ast.Global is not registered in Phase 3
@@ -297,9 +297,9 @@ class TestNodeRegistry:
             get_statement_handler(ast.Global(names=[]))
 
     def test_missing_expression_raises_unsupported(self):
-        # ast.Await is not registered in Phase 3
+        # ast.Yield is not registered
         with pytest.raises(UnsupportedFeatureError):
-            get_expression_handler(ast.Await(value=ast.Constant(value=None)))
+            get_expression_handler(ast.Yield(value=ast.Constant(value=None)))
 
     def test_list_registered_returns_dict(self):
         result = list_registered()
