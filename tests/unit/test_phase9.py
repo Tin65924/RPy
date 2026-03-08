@@ -180,24 +180,32 @@ class TestInit:
         assert (project / "src").is_dir()
         assert (project / "out").is_dir()
         assert (project / "rpy.json").exists()
-        assert (project / "src" / "main.py").exists()
+        # V0.2.0: subfolders for client/server/shared
+        assert (project / "src" / "server").is_dir()
+        assert (project / "src" / "client").is_dir()
+        assert (project / "src" / "shared").is_dir()
+        # Rojo config is generated
+        assert (project / "default.project.json").exists()
 
     def test_init_config_contents(self, tmp_path):
         project = tmp_path / "myproject"
         project.mkdir()
         main(["init", str(project)])
         config = json.loads((project / "rpy.json").read_text(encoding="utf-8"))
-        assert config["version"] == "1.0"
+        assert config["version"] == "2.0"
         assert config["src"] == "src"
         assert config["out"] == "out"
+        assert "rojo_mapping" in config
+        assert "sync_command" in config
 
     def test_init_example_script(self, tmp_path):
         project = tmp_path / "myproject"
         project.mkdir()
         main(["init", str(project)])
-        content = (project / "src" / "main.py").read_text(encoding="utf-8")
-        assert "Instance" in content
-        assert "workspace" in content
+        # Server example script has player events
+        content = (project / "src" / "server" / "main.py").read_text(encoding="utf-8")
+        assert "game" in content
+        assert "on_player_added" in content
 
     def test_init_idempotent(self, tmp_path):
         project = tmp_path / "myproject"

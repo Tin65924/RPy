@@ -171,16 +171,19 @@ class TestLiterals:
 
 class TestArithmetic:
     def test_addition(self):
+        # Constant folding: 1 + 2 is pre-computed at compile time
         code = transpile("x = 1 + 2")
-        assert "(1 + 2)" in code
+        assert "local x = 3" in code
 
     def test_subtraction(self):
+        # Constant folding: 5 - 3 is pre-computed at compile time
         code = transpile("x = 5 - 3")
-        assert "(5 - 3)" in code
+        assert "local x = 2" in code
 
     def test_multiplication(self):
+        # Constant folding: 4 * 5 is pre-computed at compile time
         code = transpile("x = 4 * 5")
-        assert "(4 * 5)" in code
+        assert "local x = 20" in code
 
     def test_division(self):
         code = transpile("x = 7 / 2")
@@ -195,8 +198,9 @@ class TestArithmetic:
         assert "(7 % 3)" in code
 
     def test_power(self):
+        # Constant folding: 2 ** 8 is pre-computed at compile time
         code = transpile("x = 2 ** 8")
-        assert "(2 ^ 8)" in code
+        assert "local x = 256" in code
 
     def test_unary_neg(self):
         code = transpile("x = -5")

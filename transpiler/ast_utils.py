@@ -172,13 +172,30 @@ def _bool_trivially_safe(node: ast.AST) -> bool:
     provably unnecessary.
 
     Safe cases:
-      - True / False / None constants  (same in both languages)
-      - Comparison results             (always bool in Python, truthy bool in Lua)
-      - BoolOp (and/or) results        (bool in Python, truthy in Lua)
+      - bool / None constants         (same in both languages)
+      - int/float non-zero literals   (both languages agree these are truthy)
+        * 0 and 0.0 differ: Python → False, Lua → true, so they still need shim
+      - Comparison results            (always produce a boolean)
+      - BoolOp (and/or) results       (result is one of the operands)
+      - UnaryOp(Not)                  (result is always a Lua boolean)
     """
     if isinstance(node, ast.Constant):
-        return isinstance(node.value, bool) or node.value is None
+        # bool and None: identical semantics in Python and Lua
+        if isinstance(node.value, bool) or node.value is None:
+            return True
+        # Non-zero integers and floats are truthy in both — safe to skip shim
+        if isinstance(node.value, (int, float)) and node.value != 0:
+            return True
+        # Non-empty strings are truthy in Python but ALSO truthy in Lua
+        # (Lua only considers nil/false as falsy — empty string is truthy in Lua)
+        # So we only need the shim for empty string ""
+        if isinstance(node.value, str) and node.value != "":
+            return True
+        return False
     if isinstance(node, (ast.Compare, ast.BoolOp)):
+        return True
+    # `not expr` always produces a Lua boolean — no shim needed
+    if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.Not):
         return True
     return False
 
@@ -191,3 +208,46 @@ def needs_bool_shim(node: ast.AST) -> bool:
     In --fast mode the caller should skip this check entirely.
     """
     return not _bool_trivially_safe(node)
+
+
+# ---------------------------------------------------------------------------
+# Constant folding helpers
+# ---------------------------------------------------------------------------
+
+_FOLD_OPS = {
+    ast.Add: lambda a, b: a + b,
+    ast.Sub: lambda a, b: a - b,
+    ast.Mult: lambda a, b: a * b,
+    ast.Pow: lambda a, b: a ** b,
+}
+
+
+def fold_constant_binop(node: ast.AST) -> Optional[int | float]:
+    """
+    If *node* is a BinOp where both operands are numeric constants and the
+    operator is foldable, return the pre-computed result.
+
+    Returns None if folding is not safe or not applicable.
+
+    Deliberately excludes division (/ // %) to avoid ZeroDivisionError and
+    floating-point precision surprises at compile time.
+    """
+    if not isinstance(node, ast.BinOp):
+        return None
+    op_type = type(node.op)
+    folder = _FOLD_OPS.get(op_type)
+    if folder is None:
+        return None
+    left, right = node.left, node.right
+    if not (isinstance(left, ast.Constant) and isinstance(right, ast.Constant)):
+        return None
+    if not (isinstance(left.value, (int, float)) and isinstance(right.value, (int, float))):
+        return None
+    # Avoid folding integer exponentiation that could produce huge literals
+    if op_type is ast.Pow and isinstance(right.value, int) and right.value > 32:
+        return None
+    try:
+        result = folder(left.value, right.value)
+    except (OverflowError, ZeroDivisionError):
+        return None
+    return result

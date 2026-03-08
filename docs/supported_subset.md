@@ -1,4 +1,4 @@
-# RPy Supported Python Subset (v0.1)
+# RPy Supported Python Subset (v0.2)
 
 This document defines the **subset of Python syntax supported by the RPy transpiler** and how those constructs map to **Luau**.
 
@@ -111,7 +111,7 @@ Luau equivalent:
 
 | Python              | Luau                              |
 | ------------------- | --------------------------------- |
-| `for x in iterable` | `for _, x in ipairs(iterable) do` |
+| `for x in iterable` | `for _, x in py_iter(iterable) do` |
 
 ---
 
@@ -123,6 +123,7 @@ Luau equivalent:
 | `break`      | `break`                 |
 | `continue`   | `continue`              |
 | `pass`       | `-- pass`               |
+| `match x:`   | `if (x == ...) then ... end` |
 
 ---
 
@@ -261,6 +262,7 @@ Foo.value = 5
 | `[1,2,3]` | `{1,2,3}` |
 | `{"a":1}` | `{a = 1}` |
 | `(1,2)`   | `{1,2}`   |
+| `{1,2,3}` | `py_set_new({1,2,3})` |
 
 ---
 
@@ -451,11 +453,8 @@ end
 
 ---
 
-# Unsupported Constructs
-
 The following features are **recognized but not implemented** and will raise `UnsupportedFeatureError`.
 
-* `match / case`
 * Multiple inheritance
 * Decorators (`@decorator`)
 * `async / await`

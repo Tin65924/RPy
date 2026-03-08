@@ -461,6 +461,79 @@ reversed(list)
 
 ---
 
+# Set Helpers (Phase 13)
+
+### `py_set_new(iterable?) → table`
+
+Creates a new **set object**. Sets are tables with an `_is_set = true` field and an `items` dictionary.
+
+Example:
+
+```python
+s = {1, 2, 3}
+s2 = set(list)
+```
+
+---
+
+### `py_set_add(set, item) → nil`
+
+Adds an item in **O(1)** time.
+
+```python
+set.add(item)
+```
+
+---
+
+### `py_set_remove(set, item) → nil`
+
+Removes an item, raising an error if it does not exist.
+
+```python
+set.remove(item)
+```
+
+---
+
+### `py_set_discard(set, item) → nil`
+
+Removes an item if it exists (no error otherwise).
+
+```python
+set.discard(item)
+```
+
+---
+
+### `py_set_clear(set) → nil`
+
+Removes all items from the set.
+
+---
+
+### `py_set_pop(set) → any`
+
+Removes and returns an arbitrary element.
+
+---
+
+# Iteration Helpers
+
+### `py_iter(iterable) → iterator`
+
+A generic iterator that supports **lists**, **dictionaries**, and **sets** in `for` loops.
+
+| Collection | Iterator Logic |
+| ---------- | -------------- |
+| List       | `ipairs()`     |
+| Set        | `pairs(items)` |
+| Dictionary | `pairs()`      |
+
+Equivalent to Python's iteration protocol.
+
+---
+
 ### `py_format(value, spec) → string`
 
 Formats values using Python-style format specifiers.

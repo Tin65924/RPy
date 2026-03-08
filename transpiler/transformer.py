@@ -2,18 +2,18 @@
 transpiler/transformer.py — Pre-codegen normalization passes over the AST.
 
 Passes (run in order by transform()):
+  0. MatchLowerer    — transforms Python 3.10 `match` statements into `if/elseif`
+                        chains before other passes (Basic literal/OR/wildcard).
   1. ScopeAnalyzer  — builds a ScopeMap: Name → first-write depth, so the
-                       generator knows when to emit `local`.
+                        generator knows when to emit `local`.
   2. ImportResolver — resolves import statements; marks SDK imports as
-                       passthroughs, relative imports as require(), rejects
-                       all others.
+                        passthroughs, relative imports as require(), rejects
+                        all others.
   3. AnnotationStripper — removes AnnAssign annotation fields (Luau handles
-                           types separately; --typed mode re-derives them).
-  4. MatchGuard     — raises UnsupportedFeatureError on any Match node
-                       (belt-and-suspenders; parser also checks).
+                            types separately; --typed mode re-derives them).
 
-None of these passes modify the AST in place — they attach metadata or raise
-errors.  The generator reads that metadata when emitting code.
+None of these passes modify the AST in place — they attach metadata or return
+a modified tree.  The generator reads that metadata when emitting code.
 """
 
 from __future__ import annotations
@@ -281,14 +281,128 @@ class _AnnotationStripper(ast.NodeTransformer):
 
 
 # ---------------------------------------------------------------------------
-# Pass 4: Match Guard (belt-and-suspenders)
+# Pass 0: Match Lowerer (Phase 13)
 # ---------------------------------------------------------------------------
 
-class _MatchGuard(ast.NodeVisitor):
-    def generic_visit(self, node: ast.AST) -> None:
-        if type(node).__name__ == "Match":
-            raise UnsupportedFeatureError("match/case", line=get_line(node))
-        super().generic_visit(node)
+class _MatchLowerer(ast.NodeTransformer):
+    """
+    Transforms `match/case` into nested `if/elseif` blocks.
+    
+    Supports:
+      - MatchValue (literals)
+      - MatchOr (p1 | p2)
+      - MatchAs (case x, case _, case pattern as x)
+      - MatchSingleton (True, False, None)
+    """
+
+    def __init__(self) -> None:
+        self._temp_count = 0
+
+    def _get_temp(self) -> str:
+        self._temp_count += 1
+        return f"_match_tmp_{self._temp_count}"
+
+    def visit_Match(self, node: ast.Match) -> list[ast.stmt]:
+        subject = node.subject
+        # Use a temp var to avoid multiple evaluation of the subject
+        # (unless it's a simple, immutable Name)
+        if isinstance(subject, ast.Name):
+            match_var = subject.id
+            pre_stmts: list[ast.stmt] = []
+        else:
+            match_var = self._get_temp()
+            # Assign subject to temp: local _match_tmp_1 = <subject>
+            pre_stmts = [ast.Assign(
+                targets=[ast.Name(id=match_var, ctx=ast.Store())],
+                value=subject,
+                lineno=node.lineno,
+                col_offset=node.col_offset
+            )]
+
+        root_if: Optional[ast.If] = None
+        current_if: Optional[ast.If] = None
+
+        for case in node.cases:
+            bind_stmts: list[ast.stmt] = []
+            cond = self._lower_pattern(case.pattern, match_var, bind_stmts)
+
+            if case.guard:
+                # Add guard clause: if (pattern check) and (guard) then
+                cond = ast.BoolOp(
+                    op=ast.And(),
+                    values=[cond, case.guard]
+                )
+
+            # Prepend bindings to the case body
+            full_body = bind_stmts + case.body
+            
+            # Lower children recursively within the case body
+            full_body = [self.visit(s) for s in full_body]  # type: ignore[misc]
+
+            new_if = ast.If(test=cond, body=full_body, orelse=[], lineno=case.pattern.lineno, col_offset=case.pattern.col_offset)
+
+            # If it's a catch-all (MatchAs with no pattern or wildcard), 
+            # we could theoretically stop here and put it in orelse, but 
+            # for-loop simplicity we'll just keep building the chain.
+
+            if root_if is None:
+                root_if = new_if
+                current_if = new_if
+            else:
+                assert current_if is not None
+                current_if.orelse = [new_if]
+                current_if = new_if
+
+        if root_if is None:
+            return pre_stmts
+        
+        return pre_stmts + [root_if]
+
+    def _lower_pattern(self, pattern: ast.AST, match_var: str, bind_stmts: list[ast.stmt]) -> ast.expr:
+        """Recursively transform a MatchPattern into a boolean Expression."""
+        
+        # case 1:
+        if isinstance(pattern, ast.MatchValue):
+            return ast.Compare(
+                left=ast.Name(id=match_var, ctx=ast.Load()),
+                ops=[ast.Eq()],
+                comparators=[pattern.value]
+            )
+
+        # case 1 | 2:
+        if isinstance(pattern, ast.MatchOr):
+            return ast.BoolOp(
+                op=ast.Or(),
+                values=[self._lower_pattern(p, match_var, bind_stmts) for p in pattern.patterns]
+            )
+
+        # case (True | False | None):
+        if isinstance(pattern, ast.MatchSingleton):
+            return ast.Compare(
+                left=ast.Name(id=match_var, ctx=ast.Load()),
+                ops=[ast.Eq()],  # Luau uses == for bool/nil
+                comparators=[ast.Constant(value=pattern.value)]
+            )
+
+        # case x: / case _: / case pattern as x:
+        if isinstance(pattern, ast.MatchAs):
+            if pattern.name:
+                # Bind the name: case x -> x = match_var
+                bind_stmts.append(ast.Assign(
+                    targets=[ast.Name(id=pattern.name, ctx=ast.Store())],
+                    value=ast.Name(id=match_var, ctx=ast.Load()),
+                    lineno=pattern.lineno,
+                    col_offset=pattern.col_offset
+                ))
+            if pattern.pattern:
+                return self._lower_pattern(pattern.pattern, match_var, bind_stmts)
+            # Wildcard or bare name always matches
+            return ast.Constant(value=True)
+
+        raise UnsupportedFeatureError(
+            f"Pattern matching type {type(pattern).__name__} is not yet supported in RPy.",
+            line=get_line(pattern)
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -302,8 +416,13 @@ def transform(tree: ast.Module) -> TransformResult:
     metadata collected.
 
     Raises:
-        UnsupportedFeatureError — for global/nonlocal/unsupported imports/match
+        UnsupportedFeatureError — for global/nonlocal/unsupported imports
     """
+    # Pass 0 — Match lowering (mutates tree)
+    lowerer = _MatchLowerer()
+    tree = lowerer.visit(tree)  # type: ignore[assignment]
+    ast.fix_missing_locations(tree)
+
     # Pass 1 — scope analysis (read-only)
     scope_analyzer = _ScopeAnalyzer()
     scope_analyzer.visit(tree)
@@ -316,9 +435,6 @@ def transform(tree: ast.Module) -> TransformResult:
     stripper = _AnnotationStripper()
     tree = stripper.visit(tree)  # type: ignore[assignment]
     ast.fix_missing_locations(tree)
-
-    # Pass 4 — match/case guard (read-only, belt-and-suspenders)
-    _MatchGuard().visit(tree)
 
     return TransformResult(
         tree=tree,

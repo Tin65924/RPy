@@ -25,7 +25,7 @@ from transpiler.errors import UnsupportedFeatureError, InternalError
 from transpiler.ast_utils import (
     get_line, node_name,
     is_range_call, unpack_range_args,
-    needs_bool_shim,
+    needs_bool_shim, fold_constant_binop,
 )
 from transpiler.transformer import TransformResult, ScopeMap, ImportInfo
 from transpiler.type_inferrer import TypeMap, infer_types
@@ -236,6 +236,7 @@ class LuauGenerator(ast.NodeVisitor):
         "int":   "py_int",
         "float": "py_float",
         "bool":  "py_bool",
+        "set":   "py_set_new",
         "print": "print",     # native in Luau, no runtime shim
         "sorted": "py_sorted",
         "enumerate": "py_enumerate",
@@ -256,6 +257,14 @@ class LuauGenerator(ast.NodeVisitor):
         return node.id
 
     def _expr_BinOp(self, node: ast.BinOp) -> str:
+        # Phase 12: constant folding — pre-evaluate numeric literals at compile time
+        folded = fold_constant_binop(node)
+        if folded is not None:
+            # Emit the pre-computed value directly (avoids runtime arithmetic)
+            if isinstance(folded, float) and folded.is_integer():
+                return str(int(folded))
+            return repr(folded)
+
         left = self.expr(node.left)
         right = self.expr(node.right)
         op_type = type(node.op)
@@ -409,6 +418,13 @@ class LuauGenerator(ast.NodeVisitor):
         """
         return self._emit_dict_comprehension(node.key, node.value, node.generators)
 
+    def _expr_Set(self, node: ast.Set) -> str:
+        """{1, 2, 3} → py_set_new({1, 2, 3})"""
+        helper = self.ctx.use_runtime("py_set_new")
+        elts = ", ".join(self.expr(e) for e in node.elts)
+        # Use a Lua table literal here; py_set_new will convert it to a set object
+        return f"{helper}({{{elts}}})"
+
     def _emit_comprehension(self, elt: ast.expr, generators: list, is_dict: bool) -> str:
         """Generate an IIFE for a list comprehension."""
         parts: list[str] = ["(function()"]
@@ -431,7 +447,8 @@ class LuauGenerator(ast.NodeVisitor):
                     else:
                         parts.append(f" for {var} = {start_s}, {stop_luau} do")
                 else:
-                    parts.append(f" for _, {var} in ipairs({iterable}) do")
+                    helper = self.ctx.use_runtime("py_iter")
+                    parts.append(f" for _, {var} in {helper}({iterable}) do")
             elif isinstance(gen.target, ast.Tuple) and len(gen.target.elts) == 2:
                 k = gen.target.elts[0]
                 v = gen.target.elts[1]
@@ -482,7 +499,8 @@ class LuauGenerator(ast.NodeVisitor):
                     else:
                         parts.append(f" for {var} = {start_s}, {stop_luau} do")
                 else:
-                    parts.append(f" for _, {var} in ipairs({iterable}) do")
+                    helper = self.ctx.use_runtime("py_iter")
+                    parts.append(f" for _, {var} in {helper}({iterable}) do")
             elif isinstance(gen.target, ast.Tuple) and len(gen.target.elts) == 2:
                 k_node = gen.target.elts[0]
                 v_node = gen.target.elts[1]
@@ -539,6 +557,10 @@ class LuauGenerator(ast.NodeVisitor):
         "strip":   "py_strip",
         "lstrip":  "py_lstrip",
         "rstrip":  "py_rstrip",
+        # set methods
+        "add":     "py_set_add",
+        "discard": "py_set_discard",
+        "clear":   "py_set_clear",
         "upper":   "py_upper",
         "lower":   "py_lower",
         "replace": "py_replace",
@@ -815,7 +837,8 @@ class LuauGenerator(ast.NodeVisitor):
             elif isinstance(target, ast.Name):
                 var = target.id
                 self.ctx.declare(var)
-                self.e.line(f"for _, {var} in ipairs({iterable}) do")
+                helper = self.ctx.use_runtime("py_iter")
+                self.e.line(f"for _, {var} in {helper}({iterable}) do")
             else:
                 raise UnsupportedFeatureError(
                     "complex for-loop target", line=get_line(node)

@@ -33,24 +33,6 @@ if _COMPILER_PY < (3, 10):
     )
 
 # ---------------------------------------------------------------------------
-# match/case guard
-# ---------------------------------------------------------------------------
-
-def _check_for_match(tree: ast.Module, filename: str | None) -> None:
-    """
-    Walk the tree and raise UnsupportedFeatureError if any Match node exists.
-    Called after parse so the error carries a proper line number.
-    """
-    for node in ast.walk(tree):
-        if type(node).__name__ == "Match":           # name-based: works on 3.8
-            line = getattr(node, "lineno", None)
-            raise UnsupportedFeatureError(
-                "match/case",
-                line=line,
-                filename=filename,
-            )
-
-# ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
 
@@ -62,15 +44,13 @@ def parse_source(source: str, filename: str | None = None) -> ast.Module:
         ast.Module — the root of the AST.
 
     Raises:
-        ParseError            — on Python syntax errors in the source.
-        UnsupportedFeatureError — if match/case is detected.
+        ParseError — on Python syntax errors in the source.
     """
     try:
         tree = ast.parse(source, filename=filename or "<string>", type_comments=False)
     except SyntaxError as exc:
         raise ParseError(exc, filename=filename) from exc
 
-    _check_for_match(tree, filename)
     return tree
 
 

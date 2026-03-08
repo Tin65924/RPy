@@ -269,7 +269,7 @@ class TestListComprehension:
 
     def test_listcomp_over_list(self):
         code = transpile("doubled = [x * 2 for x in items]")
-        assert "ipairs" in code
+        assert "py_iter" in code
 
 
 # ===========================================================================
