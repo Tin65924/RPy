@@ -482,27 +482,4 @@ function M.py_reversed(list)
     return result
 end
 
--- ===========================================================================
--- RUNTIME v3 — Advanced language helpers (Phase 6)
--- ===========================================================================
-
--- ---------------------------------------------------------------------------
--- py_format — f-string format spec support
--- Converts Python format specs to Lua string.format patterns.
--- e.g.  py_format(3.14159, ".2f") → "3.14"
--- ---------------------------------------------------------------------------
-function M.py_format(value, spec)
-    if spec == nil or spec == "" then
-        return M.py_str(value)
-    end
-    -- Try to convert Python spec to Lua format string
-    -- Common patterns: .2f, d, s, .3g, etc.
-    local lua_fmt = "%" .. spec
-    local ok, result = pcall(string.format, lua_fmt, value)
-    if ok then
-        return result
-    end
-    return M.py_str(value)
-end
-
 return M
