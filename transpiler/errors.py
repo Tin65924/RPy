@@ -56,6 +56,22 @@ class TranspileError(Exception):
             base += f"\n  Hint: {self.hint}"
         return base
 
+    def format_with_context(self, source: str | None = None) -> str:
+        """Return the error message, optionally including the source line context."""
+        base = str(self)
+        if source and self.line is not None:
+            lines = source.splitlines()
+            if 0 < self.line <= len(lines):
+                error_line = lines[self.line - 1]
+                # Indent the source line for clarity
+                base += f"\n\n    {error_line.strip()}"
+                if self.col is not None:
+                    # Simple pointer to the column (if available)
+                    # Note: .strip() above changes offsets, so be careful.
+                    # We'll stick to a simple block for now.
+                    pass
+        return base
+
 
 class UnsupportedFeatureError(TranspileError):
     """

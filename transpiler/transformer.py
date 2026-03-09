@@ -19,10 +19,15 @@ a modified tree.  The generator reads that metadata when emitting code.
 from __future__ import annotations
 
 import ast
+import os
+import sys
+import subprocess
+import json
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Optional, Any
 
 from transpiler.errors import UnsupportedFeatureError
+from transpiler.flags import CompilerFlags
 from transpiler.ast_utils import get_line
 
 # ---------------------------------------------------------------------------
@@ -90,6 +95,103 @@ class TransformResult:
     tree: ast.Module
     scope_map: ScopeMap
     import_info: ImportInfo
+    filename: str | None = None
+
+
+# ---------------------------------------------------------------------------
+# Pass 0.1: Compile-Time Evaluator
+# ---------------------------------------------------------------------------
+
+class _CompileTimeEvaluator(ast.NodeTransformer):
+    """
+    Evaluates function calls decorated with @compile_time in a subprocess.
+    Replaces the call site with the literal result (JSON-serializable).
+    """
+    def __init__(self, filename: str | None, enabled: bool):
+        self.filename = filename
+        self.enabled = enabled
+        self.compile_time_funcs: set[str] = set()
+
+    def visit_FunctionDef(self, node: ast.FunctionDef) -> ast.FunctionDef:
+        is_compile_time = any(
+            (isinstance(dec, ast.Name) and dec.id == "compile_time") or
+            (isinstance(dec, ast.Call) and isinstance(dec.func, ast.Name) and dec.func.id == "compile_time")
+            for dec in node.decorator_list
+        )
+        if is_compile_time:
+            self.compile_time_funcs.add(node.name)
+        return self.generic_visit(node) # type: ignore
+
+    def visit_Call(self, node: ast.Call) -> ast.AST:
+        if isinstance(node.func, ast.Name) and node.func.id in self.compile_time_funcs:
+            if not self.enabled:
+                # We show a warning if @compile_time is found but --compile-time flag is missing
+                # (unless it's a decorator definition itself, but we check call sites here)
+                print(f"\n⚠ Warning: Compile-time directive detected for '{node.func.id}' but execution is disabled.")
+                print("  Run with --compile-time to enable build-time Python execution.\n")
+                return node
+            
+            # Execute worker
+            return self._evaluate_call(node.func.id, node.args)
+        return self.generic_visit(node) # type: ignore
+
+    def _evaluate_call(self, func_name: str, args: list[ast.expr]) -> ast.AST:
+        if not self.filename:
+            return node # type: ignore
+
+        # For now, only support literal args
+        evaluated_args = []
+        for arg in args:
+            if isinstance(arg, ast.Constant):
+                evaluated_args.append(arg.value)
+            else:
+                # Fallback to normal call if args are complex
+                return ast.Call(func=ast.Name(id=func_name, ctx=ast.Load()), args=args, keywords=[])
+
+        worker_path = os.path.join(os.path.dirname(__file__), "compile_time_worker.py")
+        input_data = {
+            "file_path": self.filename,
+            "func_name": func_name,
+            "args": evaluated_args
+        }
+
+        try:
+            proc = subprocess.run(
+                [sys.executable, worker_path],
+                input=json.dumps(input_data).encode("utf-8"),
+                capture_output=True,
+                timeout=10
+            )
+            if proc.returncode != 0:
+                err_msg = proc.stderr.decode("utf-8")
+                print(f"  ✗ Error in compile-time execution: {err_msg}")
+                return ast.Call(func=ast.Name(id=func_name, ctx=ast.Load()), args=args, keywords=[])
+            
+            output = proc.stdout.decode("utf-8").strip()
+            if not output:
+                 return ast.Call(func=ast.Name(id=func_name, ctx=ast.Load()), args=args, keywords=[])
+
+            resp = json.loads(output)
+            if resp.get("status") == "success":
+                return self._val_to_ast(resp.get("result"))
+            else:
+                print(f"  ✗ Error in compile-time execution: {resp.get('message')}")
+        except Exception as e:
+            print(f"  ✗ Failed to run compile-time worker: {e}")
+
+        return ast.Call(func=ast.Name(id=func_name, ctx=ast.Load()), args=args, keywords=[])
+
+    def _val_to_ast(self, val: Any) -> ast.AST:
+        if val is None or isinstance(val, (int, float, str, bool)):
+            return ast.Constant(value=val)
+        if isinstance(val, list):
+            return ast.List(elts=[self._val_to_ast(v) for v in val], ctx=ast.Load())
+        if isinstance(val, dict):
+            return ast.Dict(
+                keys=[self._val_to_ast(k) for k in val.keys()],
+                values=[self._val_to_ast(v) for v in val.values()]
+            )
+        return ast.Constant(value=None)
 
 
 # ---------------------------------------------------------------------------
@@ -324,7 +426,7 @@ class _MatchLowerer(ast.NodeTransformer):
 
         for case in node.cases:
             bind_stmts: list[ast.stmt] = []
-            cond = self._lower_pattern(case.pattern, match_var, bind_stmts)
+            cond = self._lower_pattern(case.pattern, ast.Name(id=match_var, ctx=ast.Load()), bind_stmts)
 
             if case.guard:
                 # Add guard clause: if (pattern check) and (guard) then
@@ -358,13 +460,13 @@ class _MatchLowerer(ast.NodeTransformer):
         
         return pre_stmts + [root_if]
 
-    def _lower_pattern(self, pattern: ast.AST, match_var: str, bind_stmts: list[ast.stmt]) -> ast.expr:
+    def _lower_pattern(self, pattern: ast.AST, match_expr: ast.expr, bind_stmts: list[ast.stmt]) -> ast.expr:
         """Recursively transform a MatchPattern into a boolean Expression."""
         
         # case 1:
         if isinstance(pattern, ast.MatchValue):
             return ast.Compare(
-                left=ast.Name(id=match_var, ctx=ast.Load()),
+                left=match_expr,
                 ops=[ast.Eq()],
                 comparators=[pattern.value]
             )
@@ -373,29 +475,54 @@ class _MatchLowerer(ast.NodeTransformer):
         if isinstance(pattern, ast.MatchOr):
             return ast.BoolOp(
                 op=ast.Or(),
-                values=[self._lower_pattern(p, match_var, bind_stmts) for p in pattern.patterns]
+                values=[self._lower_pattern(p, match_expr, bind_stmts) for p in pattern.patterns]
             )
 
         # case (True | False | None):
         if isinstance(pattern, ast.MatchSingleton):
             return ast.Compare(
-                left=ast.Name(id=match_var, ctx=ast.Load()),
+                left=match_expr,
                 ops=[ast.Eq()],  # Luau uses == for bool/nil
                 comparators=[ast.Constant(value=pattern.value)]
             )
 
+        # case [1, x]:
+        if isinstance(pattern, ast.MatchSequence):
+            # len(subject) == len(pattern)
+            conds: list[ast.expr] = [
+                ast.Compare(
+                    left=ast.Call(
+                        func=ast.Name(id="len", ctx=ast.Load()),
+                        args=[match_expr],
+                        keywords=[]
+                    ),
+                    ops=[ast.Eq()],
+                    comparators=[ast.Constant(value=len(pattern.patterns))]
+                )
+            ]
+            
+            for i, subpat in enumerate(pattern.patterns):
+                sub_expr = ast.Subscript(
+                    value=match_expr,
+                    slice=ast.Constant(value=i),  # Generates match_expr[i] (later generated as [i+1])
+                    ctx=ast.Load()
+                )
+                conds.append(self._lower_pattern(subpat, sub_expr, bind_stmts))
+                
+            return ast.BoolOp(op=ast.And(), values=conds)
+
         # case x: / case _: / case pattern as x:
         if isinstance(pattern, ast.MatchAs):
             if pattern.name:
-                # Bind the name: case x -> x = match_var
+                # Bind the name: case x -> x = match_expr
                 bind_stmts.append(ast.Assign(
                     targets=[ast.Name(id=pattern.name, ctx=ast.Store())],
-                    value=ast.Name(id=match_var, ctx=ast.Load()),
+                    value=match_expr,
                     lineno=pattern.lineno,
                     col_offset=pattern.col_offset
                 ))
             if pattern.pattern:
-                return self._lower_pattern(pattern.pattern, match_var, bind_stmts)
+                return self._lower_pattern(pattern.pattern, match_expr, bind_stmts)
             # Wildcard or bare name always matches
             return ast.Constant(value=True)
 
@@ -409,7 +536,7 @@ class _MatchLowerer(ast.NodeTransformer):
 # Public API
 # ---------------------------------------------------------------------------
 
-def transform(tree: ast.Module) -> TransformResult:
+def transform(tree: ast.Module, filename: str | None = None, flags: CompilerFlags | None = None) -> TransformResult:
     """
     Run all transformer passes over *tree* (in order) and return a
     TransformResult containing the (possibly modified) tree plus all
@@ -421,6 +548,11 @@ def transform(tree: ast.Module) -> TransformResult:
     # Pass 0 — Match lowering (mutates tree)
     lowerer = _MatchLowerer()
     tree = lowerer.visit(tree)  # type: ignore[assignment]
+    ast.fix_missing_locations(tree)
+
+    # Pass 0.1 — Compile-time evaluation
+    ct_eval = _CompileTimeEvaluator(filename, flags.compile_time if flags else False)
+    tree = ct_eval.visit(tree)  # type: ignore[assignment]
     ast.fix_missing_locations(tree)
 
     # Pass 1 — scope analysis (read-only)
@@ -440,4 +572,5 @@ def transform(tree: ast.Module) -> TransformResult:
         tree=tree,
         scope_map=scope_analyzer.scope_map,
         import_info=import_resolver.import_info,
+        filename=filename,
     )

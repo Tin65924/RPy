@@ -27,6 +27,9 @@ def handle_pass(node: ast.Pass, ctx: GeneratorContext) -> None:
 
 @statement(ast.Break)
 def handle_break(node: ast.Break, ctx: GeneratorContext) -> None:
+    flag = ctx.get_current_break_flag()
+    if flag:
+        ctx.emitter.line(f"{flag} = true")
     ctx.emitter.line("break")
 
 @statement(ast.Continue)

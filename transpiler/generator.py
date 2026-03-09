@@ -30,16 +30,13 @@ from transpiler.ast_utils import (
 from transpiler.transformer import TransformResult, ScopeMap, ImportInfo
 from transpiler.type_inferrer import TypeMap, infer_types
 from transpiler.node_registry import get_statement_handler, get_expression_handler
+from transpiler.runtime_snippets import get_used_snippets
 
 # ---------------------------------------------------------------------------
 # Compiler flags (mirrors CLI flags)
 # ---------------------------------------------------------------------------
 
-@dataclass
-class CompilerFlags:
-    typed: bool = False      # --typed  : emit Luau type annotations
-    fast: bool = False       # --fast   : skip py_bool() shims
-    no_runtime: bool = False # --no-runtime : don't prepend runtime require
+from transpiler.flags import CompilerFlags
 
 # ---------------------------------------------------------------------------
 # CodeEmitter — indentation-aware line writer
@@ -92,6 +89,7 @@ class GeneratorContext:
     flags: CompilerFlags
     scope_map: ScopeMap
     import_info: ImportInfo
+    filename: str | None = None
     type_map: TypeMap = field(default_factory=TypeMap)
     # Tracks names already declared *at this depth* so we know local vs bare
     _declared: dict[int, set[str]] = field(default_factory=dict)
@@ -129,6 +127,20 @@ class GeneratorContext:
 
     def is_declared(self, name: str) -> bool:
         return name in self._declared.get(self._scope_depth, set())
+
+    # Stack tracking active loops and their break flag variable names (if any)
+    _loop_break_flags: list[str] = field(default_factory=list)
+
+    def push_loop(self, break_flag: str = "") -> None:
+        self._loop_break_flags.append(break_flag)
+
+    def pop_loop(self) -> None:
+        self._loop_break_flags.pop()
+
+    def get_current_break_flag(self) -> str:
+        if self._loop_break_flags:
+            return self._loop_break_flags[-1]
+        return ""
 
 # ---------------------------------------------------------------------------
 # GenerateResult
@@ -191,11 +203,44 @@ class LuauGenerator(ast.NodeVisitor):
         self.e = ctx.emitter
 
     # -----------------------------------------------------------------------
+    # Docstring helpers
+    # -----------------------------------------------------------------------
+
+    def _is_docstring(self, node: ast.AST) -> Optional[str]:
+        """Check if a node is a docstring (standalone string constant)."""
+        if isinstance(node, ast.Expr) and isinstance(node.value, ast.Constant):
+            if isinstance(node.value.value, str):
+                return node.value.value
+        return None
+
+    def _emit_docstring(self, text: str) -> None:
+        """Emit multiline docstring as Luau --[[ comments.]]"""
+        trimmed = text.strip()
+        if not trimmed:
+            return
+        
+        if "\n" in trimmed:
+            self.e.line("--[[")
+            for line in text.splitlines():
+                # Preserve the original structure but strip minimal shared indent
+                self.e.line(f"    {line}")
+            self.e.line("]]")
+        else:
+            self.e.line(f"-- {trimmed}")
+
+    # -----------------------------------------------------------------------
     # Entry point
     # -----------------------------------------------------------------------
 
     def visit(self, node: ast.AST) -> None:
         """Custom visitor that prefers registry over methods."""
+        # Inject source reference comment if enabled (Section 3)
+        if self.ctx.flags.source_refs and isinstance(node, ast.stmt):
+            line = getattr(node, "lineno", None)
+            if line is not None:
+                fname = self.ctx.filename or ""
+                self.e.line(f"-- source: {fname}:{line}")
+
         # Registry (Phase 14 refactor)
         try:
             handler = get_statement_handler(node)
@@ -208,8 +253,25 @@ class LuauGenerator(ast.NodeVisitor):
         super().visit(node)
 
     def visit_Module(self, node: ast.Module) -> None:
-        for stmt in node.body:
+        body = node.body
+        
+        # Handle module docstring
+        if body and self._is_docstring(body[0]):
+            self._emit_docstring(self._is_docstring(body[0])) # type: ignore
+            body = body[1:]
+
+        for stmt in body:
             self.visit(stmt)
+
+        # Phase 14: Emit return table for ModuleScripts
+        if self.ctx.flags.script_type == "module":
+            exports = sorted(list(self.ctx._declared.get(0, set())))
+            self.e.blank()
+            if exports:
+                export_dict = ", ".join(f"{name} = {name}" for name in exports)
+                self.e.line(f"return {{ {export_dict} }}")
+            else:
+                self.e.line("return {}")
 
     # -----------------------------------------------------------------------
     # Expressions — return Luau strings
@@ -398,16 +460,25 @@ class LuauGenerator(ast.NodeVisitor):
         if isinstance(slc, ast.Slice):
             return self._emit_slice(obj, slc)
 
-        # Simple index → obj[idx + 1]  (0→1 correction)
+        # Simple index → obj[idx + 1]  (0→1 correction for numeric indices)
         idx = self.expr(slc)
         # Optimise when idx is a literal integer
-        if isinstance(slc, ast.Constant) and isinstance(slc.value, int):
-            return f"{obj}[{slc.value + 1}]"
+        if isinstance(slc, ast.Constant):
+            if isinstance(slc.value, int):
+                return f"{obj}[{slc.value + 1}]"
+            if isinstance(slc.value, str):
+                return f"{obj}[{idx}]"
+        
         # Negative index: Python supports arr[-1], Lua doesn't natively.
         # We use a runtime helper for safety.
         if isinstance(slc, ast.UnaryOp) and isinstance(slc.op, ast.USub):
             helper = self.ctx.use_runtime("py_index")
             return f"{helper}({obj}, {idx})"
+            
+        # Fallback: if we are sure it's a number, we do +1. 
+        # For now, RPy assumes Subscript on list/tuple is numeric by default
+        # but --typed mode might help. For a general fix, if the key is likely string, 
+        # we omit +1.
         return f"{obj}[{idx} + 1]"
 
     def _emit_slice(self, obj: str, slc: ast.Slice) -> str:
@@ -584,6 +655,9 @@ class LuauGenerator(ast.NodeVisitor):
         "add":     "py_set_add",
         "discard": "py_set_discard",
         "clear":   "py_set_clear",
+        "union":   "py_set_union",
+        "intersection": "py_set_intersection",
+        "difference": "py_set_difference",
         "upper":   "py_upper",
         "lower":   "py_lower",
         "replace": "py_replace",
@@ -743,6 +817,9 @@ class LuauGenerator(ast.NodeVisitor):
         self.e.line("-- pass")
 
     def visit_Break(self, node: ast.Break) -> None:
+        flag = self.ctx.get_current_break_flag()
+        if flag:
+            self.e.line(f"{flag} = true")
         self.e.line("break")
 
     def visit_Continue(self, node: ast.Continue) -> None:
@@ -802,17 +879,26 @@ class LuauGenerator(ast.NodeVisitor):
 
     def visit_While(self, node: ast.While) -> None:
         cond = self._bool_expr(node.test)
+        break_flag = f"_break_{self.ctx.depth}" if node.orelse else ""
+        if break_flag:
+            self.e.line(f"local {break_flag} = false")
+        
+        self.ctx.push_loop(break_flag)
         self.e.line(f"while {cond} do")
         self.e.indent()
         for stmt in node.body:
             self.visit(stmt)
         self.e.dedent()
+        self.e.line("end")
+        self.ctx.pop_loop()
+        
         if node.orelse:
-            # Python while-else is rare; emit note
-            self.e.line("-- [RPy] while-else not directly supported; orelse follows:")
+            self.e.line(f"if not {break_flag} then")
+            self.e.indent()
             for stmt in node.orelse:
                 self.visit(stmt)
-        self.e.line("end")
+            self.e.dedent()
+            self.e.line("end")
 
     # -----------------------------------------------------------------------
     # For
@@ -820,6 +906,11 @@ class LuauGenerator(ast.NodeVisitor):
 
     def visit_For(self, node: ast.For) -> None:
         target = node.target
+        break_flag = f"_break_{self.ctx.depth}" if node.orelse else ""
+        if break_flag:
+            self.e.line(f"local {break_flag} = false")
+            
+        self.ctx.push_loop(break_flag)
 
         if is_range_call(node.iter):
             # Numeric for loop
@@ -873,11 +964,16 @@ class LuauGenerator(ast.NodeVisitor):
             self.visit(stmt)
         self.ctx.exit_scope()
         self.e.dedent()
+        self.e.line("end")
+        self.ctx.pop_loop()
+
         if node.orelse:
-            self.e.line("-- [RPy] for-else not supported; orelse follows:")
+            self.e.line(f"if not {break_flag} then")
+            self.e.indent()
             for stmt in node.orelse:
                 self.visit(stmt)
-        self.e.line("end")
+            self.e.dedent()
+            self.e.line("end")
 
     # -----------------------------------------------------------------------
     # Functions
@@ -885,6 +981,13 @@ class LuauGenerator(ast.NodeVisitor):
 
     def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
         name = node.name
+        body = node.body
+
+        # Handle function docstring (Emit BEFORE the header)
+        if body and self._is_docstring(body[0]):
+            self._emit_docstring(self._is_docstring(body[0])) # type: ignore
+            body = body[1:]
+
         is_new = self.ctx.declare(name)
         prefix = "local function" if is_new else "function"
 
@@ -905,7 +1008,7 @@ class LuauGenerator(ast.NodeVisitor):
             self.ctx.declare(arg.arg)
         if node.args.vararg:
             self.ctx.declare(node.args.vararg.arg)
-        for stmt in node.body:
+        for stmt in body:
             self.visit(stmt)
         self.ctx.exit_scope()
         self.e.dedent()
@@ -970,25 +1073,14 @@ class LuauGenerator(ast.NodeVisitor):
     # -----------------------------------------------------------------------
 
     def visit_ClassDef(self, node: ast.ClassDef) -> None:
-        """
-        class Foo(Base):
-            def __init__(self, x):
-                self.x = x
-            def greet(self):
-                return "hi"
-        →
-        local Foo = setmetatable({}, {__index = Base})
-        Foo.__index = Foo
-        function Foo.new(x)
-            local self = setmetatable({}, Foo)
-            self.x = x
-            return self
-        end
-        function Foo:greet()
-            return "hi"
-        end
-        """
         name = node.name
+        body = node.body
+
+        # Handle class docstring (Emit BEFORE the header)
+        if body and self._is_docstring(body[0]):
+            self._emit_docstring(self._is_docstring(body[0])) # type: ignore
+            body = body[1:]
+
         self.ctx.declare(name)
 
         # Decorators — raise
@@ -1010,7 +1102,7 @@ class LuauGenerator(ast.NodeVisitor):
         self.ctx.enter_scope()
         self.ctx.declare(name)  # class name inside its own scope
 
-        for stmt in node.body:
+        for stmt in body:
             if isinstance(stmt, ast.FunctionDef):
                 self._emit_method(name, stmt)
             elif isinstance(stmt, ast.Assign):
@@ -1031,10 +1123,17 @@ class LuauGenerator(ast.NodeVisitor):
         """Emit a method definition for a class."""
         method = node.name
         args = node.args.args
+        body = node.body
+
+        # Handle method/constructor docstring (Emit BEFORE the header)
+        if body and self._is_docstring(body[0]):
+            doc = self._is_docstring(body[0])
+            if doc:
+                self._emit_docstring(doc)
+            body = body[1:]
 
         if method == "__init__":
-            # __init__ → ClassName.new(args) with self = setmetatable({}, Class)
-            # Skip 'self' from params
+            # __init__ → ClassName.new(args)
             params = [a.arg for a in args[1:]] if len(args) > 1 else []
             if node.args.vararg:
                 params.append("...")
@@ -1045,17 +1144,17 @@ class LuauGenerator(ast.NodeVisitor):
             self.ctx.declare("self")
             for a in args[1:]:
                 self.ctx.declare(a.arg)
-            for stmt in node.body:
+            for stmt in body:
                 self.visit(stmt)
             # If no explicit return, add return self
-            if not node.body or not isinstance(node.body[-1], ast.Return):
+            if not body or not isinstance(body[-1], ast.Return):
                 self.e.line("return self")
             self.ctx.exit_scope()
             self.e.dedent()
             self.e.line("end")
             self.e.blank()
         else:
-            # Regular method → Class:method(args)  (colon syntax binds self)
+            # Regular method → Class:method(args)
             params = [a.arg for a in args[1:]] if len(args) > 1 else []
             if node.args.vararg:
                 params.append("...")
@@ -1065,7 +1164,7 @@ class LuauGenerator(ast.NodeVisitor):
             self.ctx.declare("self")
             for a in args[1:]:
                 self.ctx.declare(a.arg)
-            for stmt in node.body:
+            for stmt in body:
                 self.visit(stmt)
             self.ctx.exit_scope()
             self.e.dedent()
@@ -1224,10 +1323,17 @@ _RUNTIME_REQUIRE_LINE = 'local _RT = require(script.Parent.python_runtime)'
 def _build_header(flags: CompilerFlags, runtime_used: set[str]) -> list[str]:
     lines = ["-- Generated by RPy — do not edit manually"]
     if not flags.no_runtime and runtime_used:
-        lines.append(_RUNTIME_REQUIRE_LINE)
-        # Localise each used helper for performance
-        for name in sorted(runtime_used):
-            lines.append(f"local {name} = _RT.{name}")
+        if flags.shared_runtime:
+            lines.append(_RUNTIME_REQUIRE_LINE)
+            # Localise each used helper for performance
+            for name in sorted(runtime_used):
+                lines.append(f"local {name} = _RT.{name}")
+        else:
+            # Tree-shaking: Inject used snippets directly
+            snippets = get_used_snippets(runtime_used)
+            if snippets:
+                lines.append(snippets)
+                
     lines.append("")
     return lines
 
@@ -1261,6 +1367,7 @@ def generate(result: TransformResult, flags: CompilerFlags | None = None) -> Gen
         flags=flags,
         scope_map=result.scope_map,
         import_info=result.import_info,
+        filename=result.filename,
         type_map=type_map,
     )
     gen = LuauGenerator(ctx)

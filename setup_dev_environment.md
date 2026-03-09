@@ -7,7 +7,6 @@
 | Python | 3.8+ | Compiler runtime |
 | Git | any | Version control |
 | Roblox Studio | latest | For manual end-to-end testing |
-| Rojo | 7.x | Syncs Luau output into Studio |
 
 ## 1. Clone the repository
 

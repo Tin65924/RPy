@@ -180,12 +180,9 @@ class TestInit:
         assert (project / "src").is_dir()
         assert (project / "out").is_dir()
         assert (project / "rpy.json").exists()
-        # V0.2.0: subfolders for client/server/shared
         assert (project / "src" / "server").is_dir()
         assert (project / "src" / "client").is_dir()
         assert (project / "src" / "shared").is_dir()
-        # Rojo config is generated
-        assert (project / "default.project.json").exists()
 
     def test_init_config_contents(self, tmp_path):
         project = tmp_path / "myproject"
@@ -195,8 +192,7 @@ class TestInit:
         assert config["version"] == "2.0"
         assert config["src"] == "src"
         assert config["out"] == "out"
-        assert "rojo_mapping" in config
-        assert "sync_command" in config
+        assert "folders" in config
 
     def test_init_example_script(self, tmp_path):
         project = tmp_path / "myproject"

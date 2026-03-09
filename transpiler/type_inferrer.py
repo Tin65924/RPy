@@ -34,6 +34,12 @@ TABLE   = "{[any]: any}"
 ARRAY_NUMBER  = "{number}"
 ARRAY_STRING  = "{string}"
 ARRAY_ANY     = "{any}"
+INSTANCE      = "Instance"
+PLAYER        = "Player"
+VECTOR3       = "Vector3"
+CFRAME        = "CFrame"
+COLOR3        = "Color3"
+ENUM_ITEM     = "EnumItem"
 
 
 # ---------------------------------------------------------------------------
@@ -164,6 +170,29 @@ class TypeInferrer(ast.NodeVisitor):
                     return ARRAY_ANY
                 # Check if we know the return type of a user function
                 return self.type_map.get_return(name)
+
+            # Handle Roblox method calls: game.GetService("Players") -> Players
+            if isinstance(node.func, ast.Attribute):
+                attr = node.func.attr
+                # GetService
+                if attr == "GetService" and node.args:
+                    arg0 = node.args[0]
+                    if isinstance(arg0, ast.Constant) and isinstance(arg0.value, str):
+                        return arg0.value  # Returns the service type name
+                
+                # Instance methods that return specific types
+                if attr in ("FindFirstChild", "FindFirstAncestor", "WaitForChild"):
+                    return f"{INSTANCE}?" # Union with nil
+                
+                if attr == "GetChildren" or attr == "GetDescendants":
+                    return "{Instance}"
+                
+                # Constructors: Vector3.new(...)
+                if attr == "new" and isinstance(node.func.value, ast.Name):
+                    constructor_name = node.func.value.id
+                    if constructor_name in ("Vector3", "Vector2", "CFrame", "UDim2", "UDim", "Color3", "Rect"):
+                        return constructor_name
+                    
             return ANY
 
         if isinstance(node, ast.Subscript):

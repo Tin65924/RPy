@@ -2,16 +2,17 @@
 cli/main.py — RPy command-line interface.
 
 Usage:
-    rpy build <src> <out> [--typed] [--fast] [--no-runtime] [--verbose] [--sync]
+    rpy build <src> <out> [--typed] [--fast] [--no-runtime] [--verbose]
     rpy check <src>                   — validate only, no output
-    rpy init [dir]                    — scaffold a new RPy project (with Rojo support)
-    rpy watch <src> <out> [flags]     — rebuild on file changes, with optional auto-sync
+    rpy init [dir]                    — scaffold a new RPy project
+    rpy watch <src> <out> [flags]     — rebuild on file changes
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+from dataclasses import replace
 import os
 import shutil
 import subprocess
@@ -22,7 +23,8 @@ from typing import Optional, Sequence
 
 from transpiler.parser import parse_source, parse_file
 from transpiler.transformer import transform
-from transpiler.generator import generate, CompilerFlags, GenerateResult
+from transpiler.flags import CompilerFlags
+from transpiler.generator import generate, GenerateResult
 from transpiler.errors import TranspileError
 
 
@@ -31,23 +33,6 @@ from transpiler.errors import TranspileError
 # ---------------------------------------------------------------------------
 __version__ = "0.2.0"
 
-
-# ---------------------------------------------------------------------------
-# Default Rojo folder mapping:  src-subfolder → Roblox service name
-# ---------------------------------------------------------------------------
-_DEFAULT_ROJO_MAPPING = {
-    "server": "ServerScriptService",
-    "client": "StarterPlayerScripts",
-    "shared": "ReplicatedStorage",
-}
-
-# Template for the Rojo default.project.json
-_ROJO_PROJECT_TEMPLATE = {
-    "name": "RPyProject",
-    "tree": {
-        "$className": "DataModel",
-    },
-}
 
 
 # ---------------------------------------------------------------------------
@@ -65,167 +50,72 @@ def _load_rpy_config(project_dir: Path) -> dict:
     return {}
 
 
-def _rojo_mapping(config: dict) -> dict[str, str]:
-    """Return folder→service mapping from config, falling back to defaults."""
-    raw = config.get("rojo_mapping", {})
-    mapping = dict(_DEFAULT_ROJO_MAPPING)
+def _merge_flags(flags: CompilerFlags, config: dict) -> CompilerFlags:
+    """Merge flags from rpy.json into the provided CompilerFlags object (CLI wins)."""
+    cfg_flags = config.get("flags", {})
+    # Only override if the CLI flag is at its default (False/None) 
+    # and the config has a value. For simplicity, we just check each known key.
+    if cfg_flags.get("typed") and not flags.typed:
+        flags.typed = True
+    if cfg_flags.get("fast") and not flags.fast:
+        flags.fast = True
+    if cfg_flags.get("no_runtime") and not flags.no_runtime:
+        flags.no_runtime = True
+    if cfg_flags.get("shared_runtime") and not flags.shared_runtime:
+        flags.shared_runtime = True
+    if cfg_flags.get("source_refs") and not flags.source_refs:
+        flags.source_refs = True
+    if cfg_flags.get("compile_time") and not flags.compile_time:
+        flags.compile_time = True
+        
+    return flags
+
+
+def _get_project_folders(config: dict) -> dict[str, str]:
+    """Return folder mapping from config, falling back to defaults."""
+    # We maintain the concept of folders but they are no longer Rojo-specific.
+    # Standard Roblox script types mapping:
+    #   server -> server scripts
+    #   client -> client scripts
+    #   shared -> module scripts
+    raw = config.get("folders", {})
+    mapping = {
+        "server": "server",
+        "client": "client",
+        "shared": "shared",
+    }
     mapping.update(raw)
     return mapping
 
 
 # ---------------------------------------------------------------------------
-# Rojo project.json generation & safe merging
+# Project Setup Helpers
 # ---------------------------------------------------------------------------
-
-def _build_rojo_tree(project_dir: Path, out_dir: Path, mapping: dict[str, str]) -> dict:
-    """
-    Construct the Rojo 'tree' section mapping out subfolders to Roblox services.
-    Only includes subfolders that actually exist under *out_dir*.
-    Paths in JSON are saved relative to *project_dir*.
-    """
-    tree: dict = {"$className": "DataModel"}
-    for folder, service in mapping.items():
-        folder_path = out_dir / folder
-        if folder_path.exists():
-            # Calculate path relative to project_dir for the JSON
-            try:
-                rel_path = folder_path.relative_to(project_dir)
-            except ValueError:
-                # Fallback to absolute if not under project_dir
-                rel_path = folder_path
-            
-            tree[service] = {
-                "$className": service,
-                folder: {
-                    "$path": str(rel_path),
-                },
-            }
-    return tree
-
-
-def _write_rojo_config(
-    project_dir: Path,
-    out_dir: Path,
-    mapping: dict[str, str],
-    project_name: str = "RPyProject",
-) -> None:
-    """
-    Create or safely merge a Rojo default.project.json.
-
-    If the file already exists:
-      1. Back it up to default.project.backup.json.
-      2. Merge RPy's tree entries into the existing config (non-destructive).
-    """
-    rojo_path = project_dir / "default.project.json"
-    new_tree = _build_rojo_tree(project_dir, out_dir, mapping)
-    new_config = {"name": project_name, "tree": new_tree}
-
-    if rojo_path.exists():
-        # Back up the existing config
-        backup_path = project_dir / "default.project.backup.json"
-        shutil.copy2(rojo_path, backup_path)
-        print(f"  Backed up existing Rojo config → {backup_path}")
-
-        # Load existing and merge our keys in
-        try:
-            existing = json.loads(rojo_path.read_text(encoding="utf-8"))
-        except json.JSONDecodeError:
-            existing = {}
-
-        existing_tree = existing.get("tree", {"$className": "DataModel"})
-        # Merge: RPy entries win on conflict, existing non-RPy entries are preserved
-        merged_tree = {**existing_tree, **new_tree}
-        existing["tree"] = merged_tree
-        rojo_path.write_text(json.dumps(existing, indent=2) + "\n", encoding="utf-8")
-        print(f"  Merged Rojo mappings → {rojo_path}")
-    else:
-        rojo_path.write_text(json.dumps(new_config, indent=2) + "\n", encoding="utf-8")
-        print(f"  Created {rojo_path}")
+# (Project configuration generation logic)
 
 
 # ---------------------------------------------------------------------------
-# Auto-sync hook (runs rojo serve/build after successful transpile)
+# Syncing logic placeholder
 # ---------------------------------------------------------------------------
-
-def _run_sync_hook(config: dict, project_dir: Path, verbose: bool) -> None:
-    """
-    Run the configured sync command after a successful build.
-
-    Configured via rpy.json:
-        "sync_command": "rojo build"   (default)
-    or specify a full command list:
-        "sync_command": ["rojo", "serve", "--watch"]
-    """
-    sync_cmd = config.get("sync_command", None)
-    if sync_cmd is None:
-        # Default: try to run `rojo build` if rojo is available
-        sync_cmd = "rojo build"
-
-    if isinstance(sync_cmd, str):
-        cmd_parts = sync_cmd.split()
-    else:
-        cmd_parts = list(sync_cmd)
-
-    if verbose:
-        print(f"  → Running sync: {' '.join(cmd_parts)}")
-
-    try:
-        result = subprocess.run(
-            cmd_parts, cwd=str(project_dir), capture_output=not verbose, timeout=30
-        )
-        if result.returncode != 0 and verbose:
-            print(f"  ⚠ Sync command exited with code {result.returncode}", file=sys.stderr)
-        elif verbose:
-            print("  ✓ Sync complete.")
-    except FileNotFoundError:
-        print(
-            f"  ⚠ Sync command '{cmd_parts[0]}' not found. "
-            f"Is Rojo installed and in PATH?",
-            file=sys.stderr,
-        )
-    except subprocess.TimeoutExpired:
-        print("  ⚠ Sync command timed out after 30s.", file=sys.stderr)
+# (Sync hooks moved to external dev server)
 
 
-# ---------------------------------------------------------------------------
-# Unmapped file warning
-# ---------------------------------------------------------------------------
-
-def _warn_unmapped(src_dir: Path, mapping: dict[str, str], verbose: bool) -> None:
-    """
-    Warn about .py files under src_dir that sit outside mapped subfolders.
-    These files will still be transpiled but won't be auto-synced via Rojo.
-    """
-    if not src_dir.is_dir():
-        return
-    mapped_folders = set(mapping.keys())
-    unmapped: list[Path] = []
-    for py_file in src_dir.rglob("*.py"):
-        if py_file.name == "__init__.py" or "__pycache__" in str(py_file):
-            continue
-        rel = py_file.relative_to(src_dir)
-        top_folder = rel.parts[0] if len(rel.parts) > 1 else None
-        if top_folder not in mapped_folders:
-            unmapped.append(py_file)
-    if unmapped:
-        print(
-            f"\n⚠  Warning: {len(unmapped)} file(s) are outside mapped Rojo folders "
-            f"({', '.join(sorted(mapped_folders))}):",
-            file=sys.stderr,
-        )
-        for f in unmapped[:5]:
-            print(f"     {f}", file=sys.stderr)
-        if len(unmapped) > 5:
-            print(f"     ... and {len(unmapped)-5} more.", file=sys.stderr)
-        print(
-            "   These files will be transpiled but not auto-mapped in default.project.json.",
-            file=sys.stderr,
-        )
+# (Structure warnings removed)
 
 
 # ---------------------------------------------------------------------------
 # Core transpile function
 # ---------------------------------------------------------------------------
+
+def _get_script_type(path: Path) -> str:
+    """Determine script type from filename suffixes."""
+    name = path.name.lower()
+    if name.endswith(".server.py"):
+        return "server"
+    if name.endswith(".client.py"):
+        return "client"
+    return "module"
+
 
 def transpile_file(
     src_path: Path,
@@ -233,9 +123,18 @@ def transpile_file(
     verbose: bool = False,
 ) -> GenerateResult:
     """Parse → transform → generate a single .py file into Luau."""
+    # Create a fresh copy of flags to avoid mutating shared state (Phase 14 fix)
+    file_flags = flags
+    if flags.script_type == "module":
+        detected_type = _get_script_type(src_path)
+        if detected_type != "module":
+            from dataclasses import replace
+            file_flags = replace(flags, script_type=detected_type)
+
     tree = parse_file(src_path)
-    result = transform(tree)
-    gen_result = generate(result, flags)
+    result = transform(tree, filename=str(src_path.absolute()), flags=file_flags)
+
+    gen_result = generate(result, file_flags)
     return gen_result
 
 
@@ -266,26 +165,38 @@ def cmd_build(args: argparse.Namespace) -> int:
         typed=args.typed,
         fast=args.fast,
         no_runtime=args.no_runtime,
+        shared_runtime=args.shared_runtime,
+        source_refs=args.source_refs,
+        compile_time=args.compile_time,
     )
 
-    # Load project config for sync/mapping support
-    project_dir = src.parent if src.is_file() else src.parent
+    # Load project config
+    project_dir = src.parent if src.is_file() else src
     config = _load_rpy_config(project_dir)
-    mapping = _rojo_mapping(config)
+    flags = _merge_flags(flags, config)
 
     if src.is_file():
         if out.suffix == "":
-            out = out / src.with_suffix(".lua").name
-        transpile_and_write(src, out, flags, verbose=args.verbose)
+            name = src.name
+            if name.endswith(".server.py"):
+                new_name = name.replace(".server.py", ".server.lua")
+            elif name.endswith(".client.py"):
+                new_name = name.replace(".client.py", ".client.lua")
+            elif name.endswith(".module.py"):
+                new_name = name.replace(".module.py", ".lua")
+            else:
+                new_name = name.replace(".py", ".lua")
+            out = out / new_name
+        try:
+            transpile_and_write(src, out, flags, verbose=args.verbose)
+        except TranspileError as e:
+            source = src.read_text(encoding="utf-8") if src.exists() else None
+            print(f"Error: {e.format_with_context(source)}", file=sys.stderr)
+            return 1
         print(f"Built 1 file → {out}")
-        if getattr(args, "sync", False):
-            _run_sync_hook(config, project_dir, verbose=args.verbose)
         return 0
 
     if src.is_dir():
-        # Warn about files sitting outside mapped Rojo folders
-        _warn_unmapped(src, mapping, verbose=args.verbose)
-
         py_files = [
             f for f in src.rglob("*.py")
             if f.name != "__init__.py" and "__pycache__" not in str(f)
@@ -297,11 +208,24 @@ def cmd_build(args: argparse.Namespace) -> int:
         errors = 0
         for py_file in py_files:
             rel = py_file.relative_to(src)
-            lua_file = out / rel.with_suffix(".lua")
+            
+            # Use same naming convention for output files
+            name = py_file.name
+            if name.endswith(".server.py"):
+                new_name = name.replace(".server.py", ".server.lua")
+            elif name.endswith(".client.py"):
+                new_name = name.replace(".client.py", ".client.lua")
+            elif name.endswith(".module.py"):
+                new_name = name.replace(".module.py", ".lua")
+            else:
+                new_name = name.replace(".py", ".lua")
+            
+            lua_file = out / rel.parent / new_name
             try:
                 transpile_and_write(py_file, lua_file, flags, verbose=args.verbose)
             except TranspileError as e:
-                print(f"  ✗ {py_file}: {e}", file=sys.stderr)
+                source = py_file.read_text(encoding="utf-8") if py_file.exists() else None
+                print(f"  ✗ {py_file}:\n{e.format_with_context(source)}", file=sys.stderr)
                 errors += 1
             except Exception as e:
                 print(f"  ✗ {py_file}: internal error: {e}", file=sys.stderr)
@@ -312,8 +236,6 @@ def cmd_build(args: argparse.Namespace) -> int:
         print(f"\nBuilt {ok}/{total} files → {out}")
         if errors:
             print(f"  {errors} file(s) had errors.", file=sys.stderr)
-        elif getattr(args, "sync", False):
-            _run_sync_hook(config, project_dir, verbose=args.verbose)
         return 1 if errors else 0
 
     print(f"Error: {src} does not exist.", file=sys.stderr)
@@ -327,7 +249,15 @@ def cmd_check(args: argparse.Namespace) -> int:
         typed=args.typed,
         fast=args.fast,
         no_runtime=args.no_runtime,
+        shared_runtime=args.shared_runtime,
+        source_refs=args.source_refs,
+        compile_time=args.compile_time,
     )
+
+    # Load project config to merge flags
+    project_dir = src.parent if src.is_file() else src
+    config = _load_rpy_config(project_dir)
+    flags = _merge_flags(flags, config)
 
     files: list[Path] = []
     if src.is_file():
@@ -348,7 +278,8 @@ def cmd_check(args: argparse.Namespace) -> int:
             if args.verbose:
                 print(f"  ✓ {py_file}")
         except TranspileError as e:
-            print(f"  ✗ {py_file}: {e}", file=sys.stderr)
+            source = py_file.read_text(encoding="utf-8") if py_file.exists() else None
+            print(f"  ✗ {py_file}:\n{e.format_with_context(source)}", file=sys.stderr)
             errors += 1
         except Exception as e:
             print(f"  ✗ {py_file}: internal error: {e}", file=sys.stderr)
@@ -365,30 +296,29 @@ def cmd_check(args: argparse.Namespace) -> int:
 
 def cmd_init(args: argparse.Namespace) -> int:
     """
-    Init command: scaffold a new RPy + Rojo project.
+    Init command: scaffold a new RPy project.
 
     Creates:
         src/
-            server/      → ServerScriptService
-            client/      → StarterPlayerScripts
-            shared/      → ReplicatedStorage
+            server/
+            client/
+            shared/
         out/
             server/ client/ shared/
             python_runtime.lua
         rpy.json          — project configuration
-        default.project.json — Rojo configuration (or merged if it exists)
     """
     project_dir = Path(args.dir or ".")
     project_name = project_dir.resolve().name or "RPyProject"
 
     # Determine folder mapping from existing rpy.json (if any)
     config = _load_rpy_config(project_dir)
-    mapping = _rojo_mapping(config)
+    folders = _get_project_folders(config)
 
     # Create src subfolder structure
     src_dir = project_dir / "src"
     out_dir = project_dir / "out"
-    for folder in mapping:
+    for folder in folders:
         (src_dir / folder).mkdir(parents=True, exist_ok=True)
         (out_dir / folder).mkdir(parents=True, exist_ok=True)
 
@@ -404,14 +334,15 @@ def cmd_init(args: argparse.Namespace) -> int:
             "typed": False,
             "fast": False,
             "no_runtime": False,
+            "source_refs": False,
+            "compile_time": False,
         },
         "exclude": ["__pycache__", "*.pyc"],
-        "rojo_mapping": {
-            "server": "ServerScriptService",
-            "client": "StarterPlayerScripts",
-            "shared": "ReplicatedStorage",
+        "folders": {
+            "server": "server",
+            "client": "client",
+            "shared": "shared",
         },
-        "sync_command": "rojo build",
     }
     config_path = project_dir / "rpy.json"
     if not config_path.exists():
@@ -420,16 +351,15 @@ def cmd_init(args: argparse.Namespace) -> int:
     else:
         print(f"  {config_path} already exists — skipping.")
 
-    # default.project.json (create or merge)
-    _write_rojo_config(project_dir, out_dir, mapping, project_name=project_name)
+    # (Project file generation)
 
     # Example scripts in each folder
-    _write_example_scripts(src_dir, mapping)
+    _write_example_scripts(src_dir, folders)
 
     # Copy runtime into each out subfolder
     runtime_src = Path(__file__).parent.parent / "runtime" / "python_runtime.lua"
     if runtime_src.exists():
-        for folder in mapping:
+        for folder in folders:
             runtime_dst = out_dir / folder / "python_runtime.lua"
             if not runtime_dst.exists():
                 shutil.copy2(runtime_src, runtime_dst)
@@ -443,8 +373,7 @@ def cmd_init(args: argparse.Namespace) -> int:
     print()
     print("  Next steps:")
     print("    rpy build src/ out/            — transpile all scripts")
-    print("    rpy build src/ out/ --sync     — transpile and run rojo build")
-    print("    rpy watch src/ out/ --sync     — live-reload with Rojo")
+    print("    rpy watch src/ out/            — live-reload scripts")
     return 0
 
 
@@ -495,23 +424,21 @@ def cmd_watch(args: argparse.Namespace) -> int:
         typed=args.typed,
         fast=args.fast,
         no_runtime=args.no_runtime,
+        shared_runtime=args.shared_runtime,
+        source_refs=args.source_refs,
+        compile_time=args.compile_time,
     )
     interval = args.interval
-    do_sync = getattr(args, "sync", False)
-
-    # Load config once for mapping + sync
+    # Load config once
     project_dir = src if src.is_dir() else src.parent
     config = _load_rpy_config(project_dir)
-    mapping = _rojo_mapping(config)
+    flags = _merge_flags(flags, config)
 
     if not src.exists():
         print(f"Error: {src} does not exist.", file=sys.stderr)
         return 1
 
     print(f"Watching {src} → {out} (interval: {interval}s)")
-    if do_sync:
-        sync_cmd = config.get("sync_command", "rojo build")
-        print(f"  Auto-sync enabled: '{sync_cmd}' will run after each successful rebuild.")
     print("Press Ctrl+C to stop.\n")
 
     last_mtimes: dict[Path, float] = {}
@@ -547,16 +474,15 @@ def cmd_watch(args: argparse.Namespace) -> int:
                     transpile_and_write(py_file, lua_path, flags, verbose=True)
                     rebuilt += 1
                 except TranspileError as e:
-                    print(f"  ✗ {py_file}: {e}", file=sys.stderr)
+                    source = py_file.read_text(encoding="utf-8") if py_file.exists() else None
+                    print(f"  ✗ {py_file}:\n{e.format_with_context(source)}", file=sys.stderr)
                 except Exception as e:
                     print(f"  ✗ {py_file}: internal error: {e}", file=sys.stderr)
         return rebuilt
 
     try:
         while True:
-            rebuilt = build_changed()
-            if rebuilt > 0 and do_sync:
-                _run_sync_hook(config, project_dir, verbose=args.verbose)
+            build_changed()
             time.sleep(interval)
     except KeyboardInterrupt:
         print("\nStopped watching.")
@@ -582,10 +508,14 @@ def build_parser() -> argparse.ArgumentParser:
     build_p.add_argument("--typed", action="store_true", help="Emit Luau type annotations")
     build_p.add_argument("--fast", action="store_true", help="Skip py_bool() truthiness shims")
     build_p.add_argument("--no-runtime", action="store_true", dest="no_runtime",
-                         help="Don't prepend runtime require")
+                         help="Don't prepend runtime at all")
+    build_p.add_argument("--shared-runtime", action="store_true",
+                         help="Use a central require() instead of injecting snippets")
+    build_p.add_argument("--source-refs", action="store_true",
+                         help="Emit source line references as comments in Luau")
+    build_p.add_argument("--compile-time", action="store_true",
+                         help="Enable build-time Python execution (requires @compile_time)")
     build_p.add_argument("--verbose", "-v", action="store_true", help="Verbose output")
-    build_p.add_argument("--sync", action="store_true",
-                         help="Run sync command (e.g. rojo build) after successful build")
 
     # ---- check ----
     check_p = subparsers.add_parser("check", help="Validate .py files without output")
@@ -593,10 +523,13 @@ def build_parser() -> argparse.ArgumentParser:
     check_p.add_argument("--typed", action="store_true", help="Enable typed mode for checking")
     check_p.add_argument("--fast", action="store_true")
     check_p.add_argument("--no-runtime", action="store_true", dest="no_runtime")
+    check_p.add_argument("--shared-runtime", action="store_true")
+    check_p.add_argument("--source-refs", action="store_true")
+    check_p.add_argument("--compile-time", action="store_true")
     check_p.add_argument("--verbose", "-v", action="store_true")
 
     # ---- init ----
-    init_p = subparsers.add_parser("init", help="Scaffold a new RPy project with Rojo support")
+    init_p = subparsers.add_parser("init", help="Scaffold a new RPy project")
     init_p.add_argument("dir", nargs="?", default=".", help="Project directory (default: .)")
 
     # ---- watch ----
@@ -606,10 +539,11 @@ def build_parser() -> argparse.ArgumentParser:
     watch_p.add_argument("--typed", action="store_true")
     watch_p.add_argument("--fast", action="store_true")
     watch_p.add_argument("--no-runtime", action="store_true", dest="no_runtime")
+    watch_p.add_argument("--shared-runtime", action="store_true")
+    watch_p.add_argument("--source-refs", action="store_true")
+    watch_p.add_argument("--compile-time", action="store_true")
     watch_p.add_argument("--interval", type=float, default=1.0,
                          help="Poll interval in seconds (default: 1.0)")
-    watch_p.add_argument("--sync", action="store_true",
-                         help="Run sync command after each rebuild")
     watch_p.add_argument("--verbose", "-v", action="store_true")
 
     return parser
