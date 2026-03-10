@@ -61,6 +61,8 @@ class TableLiteral(Expression):
 class Lambda(Expression):
     args: List[str]
     body: List[Statement]
+    arg_types: List[Optional[str]] = field(default_factory=list)
+    return_type: Optional[str] = None
 
 # --- Statements ---
 
@@ -104,6 +106,7 @@ class GenericForStatement(Statement):
     vars: List[str]
     iterator: Expression
     body: List[Statement]
+    var_types: List[Optional[str]] = field(default_factory=list)
 
 @dataclass
 class FunctionDef(Statement):
@@ -112,6 +115,8 @@ class FunctionDef(Statement):
     body: List[Statement]
     is_local: bool = True
     is_method: bool = False
+    arg_types: List[Optional[str]] = field(default_factory=list)
+    return_type: Optional[str] = None
 
 @dataclass
 class ReturnStatement(Statement):

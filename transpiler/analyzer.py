@@ -65,14 +65,34 @@ class SemanticAnalyzer:
     def visit_IRAssignment(self, node: ir.IRAssignment):
         self.analyze(node.value)
         inferred = self._infer_type(node.value)
+        if inferred and not node.value.inferred_type:
+            node.value.inferred_type = inferred
         
         if isinstance(node.target, ir.IRVariable):
             if inferred:
                 self.symbol_table.define(node.target.name, inferred)
-        
-        # If target already has a type but value changes it, we might want to update it
-        # but for simple RPy let's just stick to first definition in scope
+                if not node.target.inferred_type:
+                    node.target.inferred_type = inferred
+        elif isinstance(node.target, ir.IRPropertyAccess):
+            # Check for 'self.prop = value'
+            if isinstance(node.target.receiver, ir.IRVariable) and node.target.receiver.name == "self":
+                curr_class = getattr(self, "_current_class", None)
+                if curr_class:
+                    curr_class.properties[node.target.property] = inferred or "any"
+                    node.target.inferred_type = inferred
+
         self.analyze(node.target)
+
+    def visit_IRVariable(self, node: ir.IRVariable):
+        if not node.inferred_type:
+            node.inferred_type = self.symbol_table.lookup(node.name)
+
+    def visit_IRFunctionCall(self, node: ir.IRFunctionCall):
+        self.analyze(node.func)
+        for arg in node.args:
+            self.analyze(arg)
+        if not node.inferred_type:
+            node.inferred_type = self._infer_type(node)
 
     def visit_IRMethodCall(self, node: ir.IRMethodCall):
         self.analyze(node.receiver)
@@ -111,13 +131,84 @@ class SemanticAnalyzer:
                     return
 
     def visit_IRFunctionDef(self, node: ir.IRFunctionDef):
+        # Define the function itself in the parent symbol table first
+        if node.name:
+            # We use a special prefix for function return types in symbols or just store the type
+            # For simplicity let's store it as "ReturnType(className)" or similar
+            # Actually, let's just use the function name to store its return type for now.
+            pass
+
         old_table = self.symbol_table
         self.symbol_table = SymbolTable(parent=old_table)
-        for arg in node.args:
-            self.symbol_table.define(arg, "any")
+        
+        # Define arguments with types if available
+        for i, arg in enumerate(node.args):
+            t_ann = node.arg_types[i] if i < len(node.arg_types) else None
+            self.symbol_table.define(arg, t_ann or "any")
+        
+        for stmt in node.body:
+            self.analyze(stmt)
+            
+        # Optional: Attempt to infer return type if not explicitly set
+        if not node.return_type:
+            # Simple heuristic: find all return statements
+            returns = []
+            def find_returns(n):
+                if isinstance(n, ir.IRReturnStatement):
+                    returns.append(n)
+                elif hasattr(n, "__dict__"):
+                    for attr, v in n.__dict__.items():
+                        if isinstance(v, list):
+                            for item in v: find_returns(item)
+                        elif isinstance(v, ir.IRNode): find_returns(v)
+            
+            find_returns(node)
+            if returns:
+                # Just take the first one for now
+                ret_type = self._infer_type(returns[0].value) if returns[0].value else "nil"
+                node.return_type = ret_type
+            else:
+                node.return_type = "any"
+
+        self.symbol_table = old_table
+        if node.name:
+            self.symbol_table.define(node.name, f"Function:{node.return_type}")
+
+    def visit_IRGenericForStatement(self, node: ir.IRGenericForStatement):
+        self.analyze(node.iterator)
+        
+        # Heuristic for iterator types
+        if not node.var_types:
+            if isinstance(node.iterator, ir.IRFunctionCall) and isinstance(node.iterator.func, ir.IRVariable):
+                it_name = node.iterator.func.name
+                if it_name == "ipairs":
+                    node.var_types = ["number", "any"]
+                elif it_name == "pairs":
+                    node.var_types = ["any", "any"]
+        
+        old_table = self.symbol_table
+        self.symbol_table = SymbolTable(parent=old_table)
+        for i, v in enumerate(node.vars):
+            v_type = node.var_types[i] if i < len(node.var_types) else "any"
+            self.symbol_table.define(v, v_type)
+        
         for stmt in node.body:
             self.analyze(stmt)
         self.symbol_table = old_table
+
+    def visit_IRClassDef(self, node: ir.IRClassDef):
+        # We'll store class property info in class_properties map or similar
+        # For simplicity, let's just use the symbol table to track 'self' in methods
+        old_class = getattr(self, "_current_class", None)
+        self._current_class = node
+        
+        # We might want a dedicated metadata entry for user classes
+        # ... (removed redundancy)
+        
+        for stmt in node.body:
+            self.analyze(stmt)
+            
+        self._current_class = old_class
 
     def _infer_type(self, node: ir.IRExpression) -> Optional[str]:
         if node.inferred_type:
@@ -126,6 +217,12 @@ class SemanticAnalyzer:
         if isinstance(node, ir.IRVariable):
             return self.symbol_table.lookup(node.name)
         
+        if isinstance(node, ir.IRFunctionCall):
+            if isinstance(node.func, ir.IRVariable):
+                sym = self.symbol_table.lookup(node.func.name)
+                if sym and sym.startswith("Function:"):
+                    return sym[9:]
+
         if isinstance(node, ir.IRMethodCall):
             # Special case for GetService
             receiver_type = self._infer_type(node.receiver)

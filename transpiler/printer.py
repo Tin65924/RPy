@@ -73,11 +73,23 @@ class LuauPrinter:
         return "{" + ", ".join(parts) + "}"
 
     def visit_Lambda(self, node: last.Lambda) -> str:
-        args_str = ", ".join(node.args)
+        # Handle argument types
+        args_with_types = []
+        for i, arg in enumerate(node.args):
+            type_ann = node.arg_types[i] if i < len(node.arg_types) else None
+            if type_ann:
+                args_with_types.append(f"{arg}: {type_ann}")
+            else:
+                args_with_types.append(arg)
+        
+        args_str = ", ".join(args_with_types)
+        ret_ann = f": {node.return_type}" if node.return_type else ""
+        
+        header = f"function({args_str}){ret_ann}"
         self.indent_level += 1
         body_lines = [self.indent(self.visit(stmt)) for stmt in node.body]
         self.indent_level -= 1
-        return f"function({args_str})\n" + "\n".join(body_lines) + f"\n{self.indent('end')}"
+        return header + "\n" + "\n".join(body_lines) + f"\n{self.indent('end')}"
 
     # --- Statements ---
 
@@ -129,7 +141,15 @@ class LuauPrinter:
         return f"for {node.var} = {start}, {end}{step_str} do\n" + "\n".join(body_lines) + f"\n{self.indent('end')}"
 
     def visit_GenericForStatement(self, node: last.GenericForStatement) -> str:
-        vars_str = ", ".join(node.vars)
+        vars_with_types = []
+        for i, v in enumerate(node.vars):
+            type_ann = node.var_types[i] if i < len(node.var_types) else None
+            if type_ann:
+                vars_with_types.append(f"{v}: {type_ann}")
+            else:
+                vars_with_types.append(v)
+        
+        vars_str = ", ".join(vars_with_types)
         iterator = self.visit(node.iterator)
         self.indent_level += 1
         body_lines = [self.indent(self.visit(s)) for s in node.body]
@@ -139,11 +159,23 @@ class LuauPrinter:
     def visit_FunctionDef(self, node: last.FunctionDef) -> str:
         prefix = "local " if node.is_local else ""
         name = node.name
-        args_str = ", ".join(node.args)
+        
+        # Handle argument types
+        args_with_types = []
+        for i, arg in enumerate(node.args):
+            type_ann = node.arg_types[i] if i < len(node.arg_types) else None
+            if type_ann:
+                args_with_types.append(f"{arg}: {type_ann}")
+            else:
+                args_with_types.append(arg)
+        
+        args_str = ", ".join(args_with_types)
+        ret_ann = f": {node.return_type}" if node.return_type else ""
+        
         self.indent_level += 1
         body_lines = [self.indent(self.visit(s)) for s in node.body]
         self.indent_level -= 1
-        return f"{prefix}function {name}({args_str})\n" + "\n".join(body_lines) + f"\n{self.indent('end')}"
+        return f"{prefix}function {name}({args_str}){ret_ann}\n" + "\n".join(body_lines) + f"\n{self.indent('end')}"
 
     def visit_ReturnStatement(self, node: last.ReturnStatement) -> str:
         return f"return {self.visit(node.value)}" if node.value else "return"

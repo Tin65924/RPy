@@ -93,6 +93,15 @@ class IRFunctionDef(IRStatement):
     body: List[IRStatement] = field(default_factory=list)
     is_local: bool = True
     is_method: bool = False
+    arg_types: List[Optional[str]] = field(default_factory=list)
+    return_type: Optional[str] = None
+
+@dataclass
+class IRLambda(IRExpression):
+    args: List[str] = field(default_factory=list)
+    body: List[IRStatement] = field(default_factory=list)
+    arg_types: List[Optional[str]] = field(default_factory=list)
+    return_type: Optional[str] = None
 
 @dataclass
 class IRIfStatement(IRStatement):
@@ -117,6 +126,7 @@ class IRForStatement(IRStatement):
 @dataclass
 class IRGenericForStatement(IRStatement):
     vars: List[str] = field(default_factory=list)
+    var_types: List[Optional[str]] = field(default_factory=list)
     iterator: IRExpression = field(default_factory=lambda: IRVariable())
     body: List[IRStatement] = field(default_factory=list)
 
@@ -145,6 +155,7 @@ class IRClassDef(IRStatement):
     name: str = ""
     bases: List[IRExpression] = field(default_factory=list)
     body: List[IRStatement] = field(default_factory=list)
+    properties: Dict[str, str] = field(default_factory=dict)
 
 # --- CFG Terminators ---
 

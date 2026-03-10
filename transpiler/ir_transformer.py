@@ -16,6 +16,14 @@ class PythonToIRTransformer(ast.NodeVisitor):
     def transform(self, node: ast.AST) -> ir.IRNode:
         return self.visit(node)
 
+    def _get_type_str(self, node: Optional[ast.AST]) -> Optional[str]:
+        if node is None: return None
+        if isinstance(node, ast.Name): return node.id
+        if isinstance(node, ast.Constant) and node.value is None: return "nil"
+        if isinstance(node, ast.Attribute):
+            return f"{self._get_type_str(node.value)}.{node.attr}"
+        return "any"
+
     def visit_Module(self, node: ast.Module) -> ir.IRModule:
         return ir.IRModule(
             lineno=1,
@@ -139,8 +147,10 @@ class PythonToIRTransformer(ast.NodeVisitor):
             col_offset=node.col_offset,
             name=node.name,
             args=[a.arg for a in node.args.args],
-            body=[self.visit(s) for s in node.body],
-            is_local=True # Default to local, analyzer will adjust
+            arg_types=[self._get_type_str(a.annotation) for a in node.args.args],
+            return_type=self._get_type_str(node.returns),
+            body=[self.visit(s) for s in node.body if self.visit(s) is not None],
+            is_local=True
         )
 
     def visit_Return(self, node: ast.Return) -> ir.IRReturnStatement:
@@ -182,10 +192,16 @@ class PythonToIRTransformer(ast.NodeVisitor):
             )
         
         # Generic for
+        loop_vars = []
+        if isinstance(node.target, ast.Name):
+            loop_vars = [node.target.id]
+        elif isinstance(node.target, (ast.Tuple, ast.List)):
+            loop_vars = [elt.id for elt in node.target.elts if isinstance(elt, ast.Name)]
+
         return ir.IRGenericForStatement(
             lineno=node.lineno,
             col_offset=node.col_offset,
-            vars=[node.target.id] if isinstance(node.target, ast.Name) else [],
+            vars=loop_vars,
             iterator=self.visit(node.iter),
             body=[self.visit(s) for s in node.body if self.visit(s) is not None]
         )
@@ -199,18 +215,23 @@ class PythonToIRTransformer(ast.NodeVisitor):
     def visit_Continue(self, node: ast.Continue) -> ir.IRContinueStatement:
         return ir.IRContinueStatement(lineno=node.lineno)
 
-    def visit_Lambda(self, node: ast.Lambda) -> ir.IRTableLiteral:
-        # In Luau, lambdas can be represented as functions.
-        # For IR, we'll keep them as a functional node if we had one, 
-        # but for now let's just use a simplified FunctionDef-like structure or similar.
-        # Actually, let's add IRFunctionDef support for lambdas.
-        return ir.IRFunctionDef(
+    def visit_Lambda(self, node: ast.Lambda) -> ir.IRLambda:
+        return ir.IRLambda(
             lineno=node.lineno,
             col_offset=node.col_offset,
-            name="", # Anonymous
             args=[a.arg for a in node.args.args],
+            arg_types=[self._get_type_str(a.annotation) for a in node.args.args],
             body=[ir.IRReturnStatement(value=self.visit(node.body))],
-            is_local=True
+            return_type=None # Lambda return type is harder to extract from AST easily
+        )
+
+    def visit_ClassDef(self, node: ast.ClassDef) -> ir.IRClassDef:
+        return ir.IRClassDef(
+            lineno=node.lineno,
+            col_offset=node.col_offset,
+            name=node.name,
+            bases=[self.visit(b) for b in node.bases if isinstance(b, (ast.Name, ast.Attribute))],
+            body=[self.visit(s) for s in node.body if self.visit(s) is not None]
         )
 
     def visit_ImportFrom(self, node: ast.ImportFrom) -> None:

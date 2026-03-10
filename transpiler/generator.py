@@ -144,14 +144,18 @@ class IRToLuauGenerator:
             # Anonymous function (Lambda)
             return last.Lambda(
                 args=node.args,
-                body=self._visit_block(node.body)
+                body=self._visit_block(node.body),
+                arg_types=node.arg_types if self.flags.typed else [],
+                return_type=node.return_type if self.flags.typed else None
             )
         return last.FunctionDef(
             name=node.name,
             args=node.args,
             body=self._visit_block(node.body),
             is_local=node.is_local,
-            is_method=node.is_method
+            is_method=node.is_method,
+            arg_types=node.arg_types if self.flags.typed else [],
+            return_type=node.return_type if self.flags.typed else None
         )
 
     def visit_IRIfStatement(self, node: ir.IRIfStatement) -> last.IfStatement:
@@ -171,7 +175,8 @@ class IRToLuauGenerator:
         return last.GenericForStatement(
             vars=node.vars,
             iterator=self.visit(node.iterator),
-            body=self._visit_block(node.body)
+            body=self._visit_block(node.body),
+            var_types=node.var_types if self.flags.typed else []
         )
 
     def visit_IRForStatement(self, node: ir.IRForStatement) -> last.ForStatement:
@@ -204,6 +209,37 @@ class IRToLuauGenerator:
 
     def visit_IRPassStatement(self, node: ir.IRPassStatement) -> None:
         return None
+
+    def visit_IRClassDef(self, node: ir.IRClassDef) -> last.Node:
+        # Emit: type ClassName = { prop: Type ... }
+        # local ClassName = {}; function ClassName.new() ... end
+        class_name = node.name
+        
+        results = []
+        
+        if self.flags.typed and node.properties:
+            props_str = ", ".join([f"{k}: {v}" for k, v in node.properties.items()])
+            results.append(last.Comment(f"type {class_name} = {{ {props_str} }}"))
+            # Note: last.Comment is a bit of a hack here, we should ideally have last.TypeAlias
+            # but for v0.7.0 this is a safe visual separator/documentation
+        
+        header = last.LocalAssign(name=class_name, value=last.TableLiteral())
+        results.append(header)
+        
+        methods = [m for m in node.body if isinstance(m, ir.IRFunctionDef)]
+        for m in methods:
+            m_copy = last.FunctionDef(
+                name=f"{class_name}.{m.name}",
+                # ... 
+                args=m.args,
+                body=self._visit_block(m.body),
+                is_local=False,
+                arg_types=m.arg_types if self.flags.typed else [],
+                return_type=m.return_type if self.flags.typed else None
+            )
+            results.append(m_copy)
+            
+        return last.Block(results)
 
     def visit_IRComment(self, node: ir.IRComment) -> last.Comment:
         return last.Comment(text=node.text)
