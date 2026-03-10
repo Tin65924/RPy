@@ -2,10 +2,12 @@
 cli/main.py — RPy command-line interface.
 
 Usage:
-    rpy build <src> <out> [--typed] [--fast] [--no-runtime] [--verbose]
-    rpy check <src>                   — validate only, no output
-    rpy init [dir]                    — scaffold a new RPy project
-    rpy watch <src> <out> [flags]     — rebuild on file changes
+    rpy transpile <src> <out> [--typed] [--fast] [--no-runtime] [--verbose]
+    rpy validate <src>                — validate only, no output
+    rpy setup [dir]                   — scaffold a new RPy project
+    rpy live <src> <out> [flags]      — live file monitoring & Roblox sync
+    
+    (Aliases: build=transpile, check=validate, init=setup, watch=live)
 """
 
 from __future__ import annotations
@@ -105,8 +107,6 @@ def _get_project_folders(config: dict) -> dict[str, str]:
 
 # ---------------------------------------------------------------------------
 # Core transpile function
-# ---------------------------------------------------------------------------
-
 def _get_script_type(path: Path) -> str:
     """Determine script type from filename suffixes."""
     name = path.name.lower()
@@ -115,6 +115,26 @@ def _get_script_type(path: Path) -> str:
     if name.endswith(".client.py"):
         return "client"
     return "module"
+
+
+def _validate_placement(path: Path, src_root: Path, folders: dict[str, str]) -> Optional[str]:
+    """
+    Validate if a script is placed in a logically correct folder.
+    Returns an error message if invalid, otherwise None.
+    """
+    name = path.name.lower()
+    rel_path = str(path.relative_to(src_root)).lower()
+    
+    # Example: .server.py should be in a 'server' folder (mapped or literal)
+    if ".server.py" in name:
+        if "client" in rel_path or "starterplayer" in rel_path:
+            return f"Placement Warning: Server script '{path.name}' is located in a client-side folder."
+    
+    if ".client.py" in name:
+        if "server" in rel_path or "serverscriptservice" in rel_path:
+            return f"Placement Warning: Client script '{path.name}' is located in a server-side folder."
+            
+    return None
 
 
 def transpile_file(
@@ -339,9 +359,10 @@ def cmd_init(args: argparse.Namespace) -> int:
         },
         "exclude": ["__pycache__", "*.pyc"],
         "folders": {
-            "server": "server",
-            "client": "client",
-            "shared": "shared",
+            "workspace": "src/workspace",
+            "server": "src/server",
+            "client": "src/client",
+            "shared": "src/shared"
         },
     }
     config_path = project_dir / "rpy.json"
@@ -489,6 +510,33 @@ def cmd_watch(args: argparse.Namespace) -> int:
         return 0
 
 
+def cmd_live(args: argparse.Namespace) -> int:
+    """Live command: monitor files and sync to Dev Server."""
+    src = Path(args.src)
+    out = Path(args.out)
+    flags = CompilerFlags(
+        typed=args.typed,
+        fast=args.fast,
+        no_runtime=args.no_runtime,
+        shared_runtime=args.shared_runtime,
+        source_refs=args.source_refs,
+        compile_time=args.compile_time,
+    )
+    
+    # Load config
+    project_dir = src if src.is_dir() else src.parent
+    config = _load_rpy_config(project_dir)
+    flags = _merge_flags(flags, config)
+
+    # Use asyncio to run the coordinator
+    from sync.coordinator import start_live_sync
+    try:
+        asyncio.run(start_live_sync(src, out, flags))
+    except KeyboardInterrupt:
+        print("\nLive sync stopped.")
+    return 0
+
+
 # ---------------------------------------------------------------------------
 # Argument parser
 # ---------------------------------------------------------------------------
@@ -501,50 +549,52 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--version", action="version", version=f"rpy {__version__}")
     subparsers = parser.add_subparsers(dest="command", help="Available commands")
 
-    # ---- build ----
-    build_p = subparsers.add_parser("build", help="Transpile .py files to .lua")
-    build_p.add_argument("src", help="Source file or directory")
-    build_p.add_argument("out", help="Output file or directory")
-    build_p.add_argument("--typed", action="store_true", help="Emit Luau type annotations")
-    build_p.add_argument("--fast", action="store_true", help="Skip py_bool() truthiness shims")
-    build_p.add_argument("--no-runtime", action="store_true", dest="no_runtime",
+    # ---- transpile (build) ----
+    transpile_p = subparsers.add_parser("transpile", aliases=["build"], help="Transpile .py files to .lua")
+    transpile_p.add_argument("src", help="Source file or directory")
+    transpile_p.add_argument("out", help="Output file or directory")
+    transpile_p.add_argument("--typed", action="store_true", help="Emit Luau type annotations")
+    transpile_p.add_argument("--fast", action="store_true", help="Skip py_bool() truthiness shims")
+    transpile_p.add_argument("--no-runtime", action="store_true", dest="no_runtime",
                          help="Don't prepend runtime at all")
-    build_p.add_argument("--shared-runtime", action="store_true",
+    transpile_p.add_argument("--shared-runtime", action="store_true",
                          help="Use a central require() instead of injecting snippets")
-    build_p.add_argument("--source-refs", action="store_true",
+    transpile_p.add_argument("--source-refs", action="store_true",
                          help="Emit source line references as comments in Luau")
-    build_p.add_argument("--compile-time", action="store_true",
+    transpile_p.add_argument("--compile-time", action="store_true",
                          help="Enable build-time Python execution (requires @compile_time)")
-    build_p.add_argument("--verbose", "-v", action="store_true", help="Verbose output")
+    transpile_p.add_argument("--verbose", "-v", action="store_true", help="Verbose output")
 
-    # ---- check ----
-    check_p = subparsers.add_parser("check", help="Validate .py files without output")
-    check_p.add_argument("src", help="Source file or directory")
-    check_p.add_argument("--typed", action="store_true", help="Enable typed mode for checking")
-    check_p.add_argument("--fast", action="store_true")
-    check_p.add_argument("--no-runtime", action="store_true", dest="no_runtime")
-    check_p.add_argument("--shared-runtime", action="store_true")
-    check_p.add_argument("--source-refs", action="store_true")
-    check_p.add_argument("--compile-time", action="store_true")
-    check_p.add_argument("--verbose", "-v", action="store_true")
+    # ---- validate (check) ----
+    validate_p = subparsers.add_parser("validate", aliases=["check"], help="Validate .py files without output")
+    validate_p.add_argument("src", help="Source file or directory")
+    validate_p.add_argument("--typed", action="store_true", help="Enable typed mode for checking")
+    validate_p.add_argument("--fast", action="store_true")
+    validate_p.add_argument("--no-runtime", action="store_true", dest="no_runtime")
+    validate_p.add_argument("--shared-runtime", action="store_true")
+    validate_p.add_argument("--source-refs", action="store_true")
+    validate_p.add_argument("--compile-time", action="store_true")
+    validate_p.add_argument("--verbose", "-v", action="store_true")
 
-    # ---- init ----
-    init_p = subparsers.add_parser("init", help="Scaffold a new RPy project")
-    init_p.add_argument("dir", nargs="?", default=".", help="Project directory (default: .)")
+    # ---- setup (init) ----
+    setup_p = subparsers.add_parser("setup", aliases=["init"], help="Scaffold a new RPy project")
+    setup_p.add_argument("dir", nargs="?", default=".", help="Project directory (default: .)")
 
-    # ---- watch ----
-    watch_p = subparsers.add_parser("watch", help="Watch and rebuild on changes")
-    watch_p.add_argument("src", help="Source file or directory")
-    watch_p.add_argument("out", help="Output file or directory")
-    watch_p.add_argument("--typed", action="store_true")
-    watch_p.add_argument("--fast", action="store_true")
-    watch_p.add_argument("--no-runtime", action="store_true", dest="no_runtime")
-    watch_p.add_argument("--shared-runtime", action="store_true")
-    watch_p.add_argument("--source-refs", action="store_true")
-    watch_p.add_argument("--compile-time", action="store_true")
-    watch_p.add_argument("--interval", type=float, default=1.0,
+    # ---- live (watch) ----
+    live_p = subparsers.add_parser("live", aliases=["watch"], help="Live monitoring and Roblox sync")
+    live_p.add_argument("src", help="Source file or directory")
+    live_p.add_argument("out", help="Output file or directory")
+    live_p.add_argument("--typed", action="store_true")
+    live_p.add_argument("--fast", action="store_true")
+    live_p.add_argument("--no-runtime", action="store_true", dest="no_runtime")
+    live_p.add_argument("--shared-runtime", action="store_true")
+    live_p.add_argument("--source-refs", action="store_true")
+    live_p.add_argument("--compile-time", action="store_true")
+    live_p.add_argument("--interval", type=float, default=1.0,
                          help="Poll interval in seconds (default: 1.0)")
-    watch_p.add_argument("--verbose", "-v", action="store_true")
+    live_p.add_argument("--show-out", action="store_true", help="Write transpiled files to disk even in live mode")
+    live_p.add_argument("--backup-studio", action="store_true", help="Backup existing Studio scripts before overwriting")
+    live_p.add_argument("--verbose", "-v", action="store_true")
 
     return parser
 
@@ -562,10 +612,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
 
     commands = {
+        "transpile": cmd_build,
         "build": cmd_build,
+        "validate": cmd_check,
         "check": cmd_check,
+        "setup": cmd_init,
         "init": cmd_init,
-        "watch": cmd_watch,
+        "live": cmd_live,
+        "watch": cmd_live,
     }
 
     handler = commands.get(args.command)
