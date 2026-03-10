@@ -7,6 +7,7 @@ import json
 import os
 from typing import Dict, Optional, Set, Any
 from transpiler import ir
+from transpiler.diagnostics import manager, DiagnosticManager
 
 class SymbolTable:
     def __init__(self, parent: Optional[SymbolTable] = None):
@@ -24,7 +25,8 @@ class SymbolTable:
         self.symbols[name] = type_name
 
 class SemanticAnalyzer:
-    def __init__(self):
+    def __init__(self, diagnostics: Optional[DiagnosticManager] = None):
+        self.diagnostics = diagnostics or manager
         self.metadata = self._load_metadata()
         self.symbol_table = SymbolTable()
         self._init_globals()
@@ -116,19 +118,46 @@ class SemanticAnalyzer:
     def visit_IRPropertyAccess(self, node: ir.IRPropertyAccess):
         self.analyze(node.receiver)
         receiver_type = self._infer_type(node.receiver)
-        if receiver_type:
-            class_info = self._get_class_info(receiver_type)
-            if class_info:
-                # Check properties
-                prop_type = class_info.get("properties", {}).get(node.property)
-                if prop_type:
-                    node.inferred_type = prop_type
-                    return
-                # Check signals
-                signal_type = class_info.get("signals", {}).get(node.property)
-                if signal_type:
-                    node.inferred_type = signal_type
-                    return
+        
+        if not receiver_type or receiver_type == "any":
+            return
+
+        is_optional = receiver_type.endswith("?")
+        base_type = receiver_type[:-1] if is_optional else receiver_type
+        
+        if is_optional:
+            self.diagnostics.warning(
+                f"Property access '{node.property}' on optional type '{receiver_type}'.",
+                line=node.lineno, col=node.col_offset,
+                hint=f"Consider checking 'if {getattr(node.receiver, 'name', 'object')} then' first."
+            )
+
+        class_info = self._get_class_info(base_type)
+        if class_info:
+            # Check properties
+            props = class_info.get("properties", {})
+            prop_type = props.get(node.property)
+            if prop_type:
+                node.inferred_type = prop_type
+                return
+                
+            # Check signals
+            signals = class_info.get("signals", {})
+            signal_type = signals.get(node.property)
+            if signal_type:
+                node.inferred_type = signal_type
+                return
+            
+            # Not found: Fuzzy match
+            from transpiler.ast_utils import get_closest_match
+            all_possibilities = list(props.keys()) + list(signals.keys()) + list(class_info.get("methods", {}).keys())
+            closest = get_closest_match(node.property, all_possibilities)
+            
+            self.diagnostics.error(
+                f"Property '{node.property}' does not exist on type '{base_type}'.",
+                line=node.lineno, col=node.col_offset,
+                hint=f"Did you mean '{closest}'?" if closest else f"Verify the member exists on {base_type}."
+            )
 
     def visit_IRFunctionDef(self, node: ir.IRFunctionDef):
         # Define the function itself in the parent symbol table first
@@ -196,6 +225,29 @@ class SemanticAnalyzer:
             self.analyze(stmt)
         self.symbol_table = old_table
 
+    def visit_IRIfStatement(self, node: ir.IRIfStatement):
+        self.analyze(node.condition)
+        
+        # Flow-sensitive refinement
+        refined_var = None
+        old_type = None
+        if isinstance(node.condition, ir.IRVariable):
+            refined_var = node.condition.name
+            old_type = self.symbol_table.lookup(refined_var)
+            if old_type and old_type.endswith("?"):
+                self.symbol_table.define(refined_var, old_type[:-1]) # Strip ?
+        
+        for stmt in node.then_block:
+            self.analyze(stmt)
+            
+        # Restore type after then_block
+        if refined_var and old_type:
+            self.symbol_table.define(refined_var, old_type)
+
+        if node.else_block:
+            for stmt in node.else_block:
+                self.analyze(stmt)
+
     def visit_IRClassDef(self, node: ir.IRClassDef):
         # We'll store class property info in class_properties map or similar
         # For simplicity, let's just use the symbol table to track 'self' in methods
@@ -262,6 +314,6 @@ class SemanticAnalyzer:
                 return merged
         return info
 
-def analyze(module: ir.IRModule):
-    analyzer = SemanticAnalyzer()
+def analyze(module: ir.IRModule, diagnostics: Optional[DiagnosticManager] = None):
+    analyzer = SemanticAnalyzer(diagnostics)
     analyzer.analyze(module)

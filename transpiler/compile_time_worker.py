@@ -1,8 +1,44 @@
-import sys
-import json
-import importlib.util
-import os
 import contextlib
+import subprocess
+import ast
+
+def execute_macro(node: ast.Call, file_path: str | None) -> Any:
+    """Invokes the current file as a script to run the compile-time function."""
+    if not file_path: return None
+    
+    # We'll call ourselves (compile_time_worker.py)
+    # This ensures a clean sandbox for the user code
+    curr_script = __file__
+    
+    func_name = node.func.id if isinstance(node.func, ast.Name) else ""
+    # Simplified: extract literal args only for now
+    args = []
+    for arg in node.args:
+        if isinstance(arg, ast.Constant):
+            args.append(arg.value)
+            
+    payload = json.dumps({
+        "file_path": file_path,
+        "func_name": func_name,
+        "args": args
+    })
+    
+    try:
+        proc = subprocess.run(
+            [sys.executable, curr_script],
+            input=payload.encode("utf-8"),
+            capture_output=True,
+            check=True
+        )
+        resp = json.loads(proc.stdout.decode("utf-8"))
+        if resp.get("status") == "success":
+            return resp.get("result")
+        else:
+            print(f"Macro Error: {resp.get('message')}")
+            return None
+    except Exception as e:
+        print(f"Macro Execution failed: {e}")
+        return None
 
 def main():
     try:

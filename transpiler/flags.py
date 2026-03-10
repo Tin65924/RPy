@@ -11,3 +11,4 @@ class CompilerFlags:
     script_type: str = "module" # --script_type : "module", "server", "client"
     show_out: bool = False      # --show-out : reveal the hidden out folder
     backup_studio: bool = False # --backup-studio : archive scripts before overwrite
+    debug: bool = False         # --debug  : enable diagnostic logging

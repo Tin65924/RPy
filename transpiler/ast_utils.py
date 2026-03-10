@@ -8,7 +8,8 @@ Python values.  They contain no side-effects and no state.
 from __future__ import annotations
 
 import ast
-from typing import Iterator, Optional, Tuple
+from typing import Iterator, Optional, Tuple, List
+import difflib
 
 
 # ---------------------------------------------------------------------------
@@ -30,6 +31,11 @@ def get_col(node: ast.AST) -> Optional[int]:
 def node_name(node: ast.AST) -> str:
     """Return a human-readable name for *node* type (e.g. 'FunctionDef')."""
     return type(node).__name__
+
+def get_closest_match(word: str, possibilities: List[str]) -> Optional[str]:
+    """Return the closest match for *word* in *possibilities* using difflib."""
+    matches = difflib.get_close_matches(word, possibilities, n=1, cutoff=0.6)
+    return matches[0] if matches else None
 
 
 # ---------------------------------------------------------------------------

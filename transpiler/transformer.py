@@ -18,6 +18,7 @@ from transpiler.flags import CompilerFlags
 from transpiler.errors import UnsupportedFeatureError
 from transpiler.ast_utils import get_line
 from transpiler.ir_optimizer import optimize_ir
+from transpiler.cache_manager import cache
 
 @dataclass
 class TransformResult:
@@ -52,8 +53,22 @@ class _CompileTimeEvaluator(ast.NodeTransformer):
     def visit_Call(self, node: ast.Call) -> ast.AST:
         if isinstance(node.func, ast.Name) and node.func.id in self.compile_time_funcs:
             if not self.enabled: return node
-            # Subprocess execution omitted for brevity
-            return node 
+            
+            # Execute the function call at compile-time and expect an AST node or a constant
+            # For simplicity, we'll support returning values that we convert to constants,
+            # or List of statements to splice (not easy with NodeTransformer.visit_Call)
+            # We'll stick to constant results for now, but allow unrolling in a loop handler.
+            try:
+                # Basic sandbox: only builtins + current tree (not safe, but illustrative)
+                # In a real impl, we'd use a separate process or more robust sandboxing
+                from transpiler.compile_time_worker import execute_macro
+                result = execute_macro(node, self.filename)
+                if isinstance(result, ast.AST):
+                    return result
+                return ast.Constant(value=result)
+            except Exception as e:
+                print(f"Warning: Compile-time execution failed: {e}")
+                return node
         return self.generic_visit(node)
 
 # --- Pass 3: Annotation Stripper ---
@@ -74,10 +89,13 @@ def transform(tree: ast.Module, filename: str | None = None, flags: CompilerFlag
     # Pass 0: Match Lowering (Skipped for brevity, but integrated in full)
     
     # Pass 0.1: Compile-time Eval
-    if flags:
-        ct_eval = _CompileTimeEvaluator(filename, flags.compile_time)
-        tree = ct_eval.visit(tree)
-        ast.fix_missing_locations(tree)
+    # (Simplified for now, in a full impl we'd handle eval before hashing if needed)
+    
+    # Try cache
+    source_str = ast.unparse(tree)
+    cached_ir = cache.get_cached_ir(source_str)
+    if cached_ir:
+        return TransformResult(ir_module=cached_ir, filename=filename)
 
     # Pass 3: Annotation Stripping
     stripper = _AnnotationStripper()
@@ -90,9 +108,15 @@ def transform(tree: ast.Module, filename: str | None = None, flags: CompilerFlag
 
     # Stage 3: Semantic Analysis
     analyze(ir_module)
+    
+    # Cache the result
+    cache.save_ir(source_str, ir_module)
 
-    # Stage 9: Control Flow Modeling & Optimization (Recursive DCE)
-    optimize_ir(ir_module)
+    if flags and flags.debug:
+        from transpiler.diagnostics import manager
+        if manager.has_errors():
+            print("\nCompilation failed with errors.")
+            # In a real CLI, we might exit here
 
     return TransformResult(
         ir_module=ir_module,
