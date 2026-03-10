@@ -32,8 +32,16 @@ class IRToLuauGenerator:
         visitor = getattr(self, method_name, self.generic_visit)
         return visitor(node)
 
+    def _visit_block(self, nodes: List[ir.IRStatement]) -> List[last.Statement]:
+        results = []
+        for n in nodes:
+            res = self.visit(n)
+            if res is not None:
+                results.append(res)
+        return results
+
     def visit_IRModule(self, node: ir.IRModule) -> last.Block:
-        return last.Block(body=[self.visit(s) for s in node.body if self.visit(s) is not None])
+        return last.Block(body=self._visit_block(node.body))
 
     # --- Expressions ---
 
@@ -126,7 +134,8 @@ class IRToLuauGenerator:
             should_be_local = False
 
         if should_be_local:
-            return last.LocalAssign(name=target.name, value=value)
+            type_ann = node.value.inferred_type if self.flags.typed else None
+            return last.LocalAssign(name=target.name, value=value, type_annotation=type_ann)
         
         return last.Assignment(target=target, value=value)
 
@@ -135,12 +144,12 @@ class IRToLuauGenerator:
             # Anonymous function (Lambda)
             return last.Lambda(
                 args=node.args,
-                body=[self.visit(s) for s in node.body if self.visit(s) is not None]
+                body=self._visit_block(node.body)
             )
         return last.FunctionDef(
             name=node.name,
             args=node.args,
-            body=[self.visit(s) for s in node.body if self.visit(s) is not None],
+            body=self._visit_block(node.body),
             is_local=node.is_local,
             is_method=node.is_method
         )
@@ -148,21 +157,21 @@ class IRToLuauGenerator:
     def visit_IRIfStatement(self, node: ir.IRIfStatement) -> last.IfStatement:
         return last.IfStatement(
             condition=self.visit(node.condition),
-            then_block=[self.visit(s) for s in node.then_block if self.visit(s) is not None],
-            else_block=[self.visit(s) for s in node.else_block if self.visit(s) is not None] if node.else_block else None
+            then_block=self._visit_block(node.then_block),
+            else_block=self._visit_block(node.else_block) if node.else_block else None
         )
 
     def visit_IRWhileStatement(self, node: ir.IRWhileStatement) -> last.WhileStatement:
         return last.WhileStatement(
             condition=self.visit(node.condition),
-            body=[self.visit(s) for s in node.body if self.visit(s) is not None]
+            body=self._visit_block(node.body)
         )
 
     def visit_IRGenericForStatement(self, node: ir.IRGenericForStatement) -> last.GenericForStatement:
         return last.GenericForStatement(
             vars=node.vars,
             iterator=self.visit(node.iterator),
-            body=[self.visit(s) for s in node.body if self.visit(s) is not None]
+            body=self._visit_block(node.body)
         )
 
     def visit_IRForStatement(self, node: ir.IRForStatement) -> last.ForStatement:
@@ -179,7 +188,7 @@ class IRToLuauGenerator:
             start=self.visit(node.start),
             end=stop_expr,
             step=self.visit(node.step) if node.step else None,
-            body=[self.visit(s) for s in node.body if self.visit(s) is not None]
+            body=self._visit_block(node.body)
         )
 
     def visit_IRReturnStatement(self, node: ir.IRReturnStatement) -> last.ReturnStatement:

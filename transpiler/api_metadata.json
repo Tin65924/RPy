@@ -1,87 +1,114 @@
 {
   "classes": {
-    "Instance": {
+    "DataModel": {
       "methods": {
-        "Destroy": { "call_style": "colon" },
-        "Clone": { "call_style": "colon" },
-        "IsA": { "call_style": "colon" },
-        "WaitForChild": { "call_style": "colon" },
-        "FindFirstChild": { "call_style": "colon" },
-        "ClearAllChildren": { "call_style": "colon" },
-        "GetChildren": { "call_style": "colon" },
-        "GetAttribute": { "call_style": "colon" },
-        "SetAttribute": { "call_style": "colon" }
+        "GetService": {
+          "returns": "Instance",
+          "style": "colon"
+        }
       },
       "properties": {
-        "Name": { "type": "string" },
-        "Parent": { "type": "Instance" },
-        "ClassName": { "type": "string" }
+        "Workspace": "Workspace",
+        "Players": "Players"
+      }
+    },
+    "Workspace": {
+      "inherits": "Model",
+      "properties": {
+        "CurrentCamera": "Camera"
+      }
+    },
+    "Instance": {
+      "methods": {
+        "new": {
+          "returns": "Instance",
+          "style": "dot"
+        },
+        "Clone": {
+          "returns": "Instance",
+          "style": "colon"
+        },
+        "Destroy": {
+          "returns": "void",
+          "style": "colon"
+        },
+        "FindFirstChild": {
+          "returns": "Instance",
+          "style": "colon"
+        }
       },
-      "signals": {
-        "Changed": { "type": "RBXScriptSignal" },
-        "AncestryChanged": { "type": "RBXScriptSignal" }
+      "properties": {
+        "Name": "string",
+        "Parent": "Instance",
+        "ClassName": "string"
       }
     },
     "Part": {
-      "extends": "Instance",
+      "inherits": "BasePart",
       "properties": {
-        "Position": { "type": "Vector3" },
-        "Size": { "type": "Vector3" },
-        "Anchored": { "type": "boolean" },
-        "CanCollide": { "type": "boolean" },
-        "Transparency": { "type": "number" }
+        "Position": "Vector3",
+        "Size": "Vector3",
+        "Anchored": "bool",
+        "Transparency": "number"
       },
       "signals": {
-        "Touched": { "type": "RBXScriptSignal" },
-        "TouchEnded": { "type": "RBXScriptSignal" }
+        "Touched": "RBXScriptSignal",
+        "TouchEnded": "RBXScriptSignal"
       }
     },
-    "workspace": {
-      "extends": "Instance",
-      "methods": {
-        "Raycast": { "call_style": "colon" }
-      }
-    },
-    "game": {
-      "methods": {
-        "GetService": { "call_style": "colon" },
-        "IsLoaded": { "call_style": "colon" }
+    "BasePart": {
+      "inherits": "Instance",
+      "properties": {
+        "CFrame": "CFrame",
+        "CanCollide": "bool"
       }
     },
     "RBXScriptSignal": {
       "methods": {
-        "Connect": { "call_style": "colon" },
-        "Once": { "call_style": "colon" },
-        "Wait": { "call_style": "colon" }
+        "Connect": {
+          "returns": "RBXScriptConnection",
+          "style": "colon"
+        },
+        "Wait": {
+          "returns": "any",
+          "style": "colon"
+        },
+        "Once": {
+          "returns": "RBXScriptConnection",
+          "style": "colon"
+        }
+      }
+    },
+    "Players": {
+      "inherits": "Instance",
+      "properties": {
+        "LocalPlayer": "Player"
+      }
+    },
+    "Player": {
+      "inherits": "Instance",
+      "properties": {
+        "Character": "Model"
       }
     },
     "Vector3": {
       "methods": {
-        "new": { "call_style": "dot" }
-      }
-    },
-    "CFrame": {
-      "methods": {
-        "new": { "call_style": "dot" },
-        "Angles": { "call_style": "dot" }
-      }
-    },
-    "InstanceLib": {
-      "name": "Instance",
-      "methods": {
-        "new": { "call_style": "dot" }
+        "new": {
+          "returns": "Vector3",
+          "style": "dot"
+        }
+      },
+      "properties": {
+        "X": "number",
+        "Y": "number",
+        "Z": "number"
       }
     }
   },
-  "libraries": {
-    "math": { "call_style": "dot" },
-    "table": { "call_style": "dot" },
-    "string": { "call_style": "dot" },
-    "task": { "call_style": "dot" },
-    "debug": { "call_style": "dot" },
-    "os": { "call_style": "dot" },
-    "coroutine": { "call_style": "dot" },
-    "utf8": { "call_style": "dot" },
-    "bit32": { "call_style": "dot" }
+  "globals": {
+    "game": "DataModel",
+    "workspace": "Workspace",
+    "Instance": "Instance",
+    "Vector3": "Vector3"
   }
 }
