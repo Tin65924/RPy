@@ -17,6 +17,7 @@ from transpiler.analyzer import analyze
 from transpiler.flags import CompilerFlags
 from transpiler.errors import UnsupportedFeatureError
 from transpiler.ast_utils import get_line
+from transpiler.ir_optimizer import optimize_ir
 
 @dataclass
 class TransformResult:
@@ -89,6 +90,9 @@ def transform(tree: ast.Module, filename: str | None = None, flags: CompilerFlag
 
     # Stage 3: Semantic Analysis
     analyze(ir_module)
+
+    # Stage 9: Control Flow Modeling & Optimization (Recursive DCE)
+    optimize_ir(ir_module)
 
     return TransformResult(
         ir_module=ir_module,

@@ -1,12 +1,12 @@
--- RPy Studio Plugin (v0.2.0)
+-- RPy Studio Plugin (v0.3.0)
 -- Native syncing for Python -> Roblox development.
 
 local HttpService = game:GetService("HttpService")
 local Selection = game:GetService("Selection")
 local ChangeHistoryService = game:GetService("ChangeHistoryService")
 
-local SERVER_URL = "http://localhost:8000"
-local POLL_INTERVAL = 1.0
+local SERVER_URL = "http://127.0.0.1:8000"
+local POLL_INTERVAL = 0.1
 
 local pluginName = "RPy Sync"
 local toolbar = plugin:CreateToolbar(pluginName)
@@ -81,7 +81,7 @@ toggleBtn.Size = UDim2.new(1, -20, 0, 30)
 toggleBtn.Position = UDim2.new(0, 10, 1, -40)
 toggleBtn.BackgroundColor3 = Color3.fromRGB(59, 130, 246)
 toggleBtn.Text = "Auto-Overwrite: ON"
-toggleBtn.TextColor3 = Color3.white
+toggleBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
 toggleBtn.Font = Enum.Font.SourceSansBold
 toggleBtn.Parent = container
 
@@ -93,7 +93,7 @@ end)
 
 -- Core Sync Logic
 local isSyncing = false
-local lastTimestamp = 0
+local lastEventId = 0
 
 local function getContainerForPath(relPath)
     -- Simplified folder mapping. In production, this would read rpy.json folders.
@@ -112,12 +112,16 @@ local function getContainerForPath(relPath)
     return game:GetService("ServerStorage")
 end
 
-local function syncFile(path, fileData, config)
-    local code = fileData.code
-    local scriptType = fileData.type
+local function syncFile(path, event, config)
+    local code = event.code
+    local scriptType = event.script_type
+    local eventType = event.type or "update"
     
     local parent = getContainerForPath(path)
     if not parent then return end
+    
+    -- Normalize path for segments
+    path = path:gsub("\\", "/")
     
     -- Split path into segments
     local segments = {}
@@ -140,6 +144,18 @@ local function syncFile(path, fileData, config)
     local fileName = segments[#segments]
     local name = fileName:gsub("%.py$", ""):gsub("%.server$", ""):gsub("%.client$", "")
     
+    local existing = parent:FindFirstChild(name)
+    
+    -- Handle Deletion
+    if eventType == "delete" then
+        if existing then
+            existing:Destroy()
+            return true
+        end
+        return false
+    end
+    
+    -- Handle Update/Create
     local className = "ModuleScript"
     if scriptType == "server" then
         className = "Script"
@@ -147,7 +163,6 @@ local function syncFile(path, fileData, config)
         className = "LocalScript"
     end
     
-    local existing = parent:FindFirstChild(name)
     local scriptObj = existing
     if existing then
         if not overwriteEnabled then return end
@@ -173,27 +188,47 @@ local function syncFile(path, fileData, config)
     
     scriptObj = scriptObj or Instance.new(className)
     scriptObj.Name = name
-    scriptObj.Source = code
+    scriptObj.Source = code or ""
     scriptObj.Parent = parent
     
     return true
 end
 
 local function poll()
-    if not isSyncing then return end
+    if not isSyncing then 
+        statusLabel.Text = "Sync Disabled"
+        statusDot.BackgroundColor3 = Color3.fromRGB(82, 82, 91) -- Gray
+        return 
+    end
     
     local success, response = pcall(function()
-        return HttpService:GetAsync(SERVER_URL .. "/sync?since=" .. lastTimestamp)
+        return HttpService:GetAsync(SERVER_URL .. "/sync?after=" .. lastEventId)
     end)
     
     if success then
-        local responseData = HttpService:JSONDecode(response)
-        lastTimestamp = responseData.timestamp
+        local decodeSuccess, responseData = pcall(function()
+            return HttpService:JSONDecode(response)
+        end)
+        
+        if not decodeSuccess then
+            statusLabel.Text = "JSON Decode Error"
+            statusDot.BackgroundColor3 = Color3.fromRGB(249, 115, 22) -- Orange
+            return
+        end
+        
+        -- Handle forced resync
+        if responseData.resync then
+            lastEventId = 0
+            poll() -- retry immediately with 0
+            return
+        end
+        
+        lastEventId = responseData.latest_event_id
         local config = responseData.config
         
         local syncCount = 0
-        for path, fileData in pairs(responseData.files) do
-            if syncFile(path, fileData, config) then
+        for _, event in ipairs(responseData.events) do
+            if syncFile(event.path, event, config) then
                 syncCount = syncCount + 1
             end
         end
@@ -206,8 +241,9 @@ local function poll()
         statusLabel.Text = "Connected"
         statusDot.BackgroundColor3 = Color3.fromRGB(34, 197, 94) -- Green
     else
-        statusLabel.Text = "Server Offline"
+        statusLabel.Text = "Offline (Check Output)"
         statusDot.BackgroundColor3 = Color3.fromRGB(239, 68, 68) -- Red
+        warn("[RPy Sync Error]: " .. tostring(response))
     end
 end
 

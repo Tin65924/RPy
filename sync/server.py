@@ -2,6 +2,8 @@ import asyncio
 import json
 import time
 import gzip
+import hashlib
+from collections import deque
 from aiohttp import web
 from pathlib import Path
 from typing import Dict, Optional, Any
@@ -18,8 +20,12 @@ class DevServer:
         ])
         
         # In-memory virtual filesystem for transpiled Luau code
-        # Path (str) -> { "code": str, "mtime": float, "type": str }
+        # Path (str) -> { "code": str, "mtime": float, "type": str, "sid": str }
         self.vfs: Dict[str, Dict[str, Any]] = {}
+        self.events = deque(maxlen=1000) # Deque of { "id": int, "path": str, "type": str, "code": str/None }
+        self.next_event_id = 1
+        self.oldest_event_id = 1
+        
         self.last_sync_time = time.time()
         self.start_time = time.time()
         
@@ -43,19 +49,30 @@ class DevServer:
 
     async def handle_sync(self, request: web.Request) -> web.Response:
         """
-        Plugin polls this to get changed files since its last requested timestamp.
-        Query Param: since (float)
+        Plugin polls this to get changed files since its last requested event ID.
+        Query Param: after (int)
         """
-        since = float(request.query.get("since", 0))
+        try:
+            after_id = int(request.query.get("after", 0))
+        except ValueError:
+            after_id = 0
+            
+        # Robustness check: If after_id is too old or server restart (no events)
+        resync = False
+        if after_id > 0:
+            if not self.events or after_id < self.oldest_event_id - 1:
+                resync = True
         
-        changed = {}
-        for path, data in self.vfs.items():
-            if data["mtime"] > since:
-                changed[path] = data
+        if resync:
+            return web.json_response({"resync": True, "latest_event_id": self.next_event_id - 1})
+            
+        # Filter events from deque
+        new_events = [e for e in self.events if e["id"] > after_id]
         
         response_data = {
             "timestamp": time.time(),
-            "files": changed,
+            "events": new_events,
+            "latest_event_id": self.next_event_id - 1,
             "config": self.config
         }
         
@@ -73,18 +90,64 @@ class DevServer:
         
         return web.Response(body=json_data, content_type='application/json')
 
+    def _generate_sid(self, path: str) -> str:
+        """Generate a deterministic stable ID for a file path (normalized)."""
+        normalized_path = path.replace("\\", "/")
+        return hashlib.md5(normalized_path.encode()).hexdigest()
+
     def update_file(self, path: str, code: str, script_type: str, latency: float = 0.0):
-        """Update a file in the virtual filesystem."""
+        """Update a file in the virtual filesystem and log an event."""
+        path = path.replace("\\", "/")
+        sid = self._generate_sid(path)
         self.vfs[path] = {
             "code": code,
             "mtime": time.time(),
-            "type": script_type
+            "type": script_type,
+            "sid": sid
         }
+        
+        # Log event
+        event = {
+            "id": self.next_event_id,
+            "type": "update",
+            "script_type": script_type,
+            "path": path,
+            "code": code,
+            "sid": sid
+        }
+        self.events.append(event)
+        self.next_event_id += 1
+        
+        # Update oldest tracking (deque handles maxlen automatically)
+        if self.events:
+            self.oldest_event_id = self.events[0]["id"]
+
         self.stats["files_synced"] += 1
         self.stats["last_latency"] = latency
         # Simple moving average for latency
-        self.stats["avg_latency"] = (self.stats["avg_latency"] * 0.9) + (latency * 0.1)
+        current_avg = self.stats.get("avg_latency", 0)
+        self.stats["avg_latency"] = (current_avg * 0.9) + (latency * 0.1)
         self.last_sync_time = time.time()
+
+    def remove_file(self, path: str):
+        """Remove a file from VFS and log a delete event."""
+        path = path.replace("\\", "/")
+        if path in self.vfs:
+            sid = self.vfs[path]["sid"]
+            del self.vfs[path]
+            
+            event = {
+                "id": self.next_event_id,
+                "type": "delete",
+                "path": path,
+                "sid": sid
+            }
+            self.events.append(event)
+            self.next_event_id += 1
+            if self.events:
+                self.oldest_event_id = self.events[0]["id"]
+            return True
+        return False
 
     async def start(self):
         runner = web.AppRunner(self.app)

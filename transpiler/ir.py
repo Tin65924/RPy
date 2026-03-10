@@ -145,3 +145,15 @@ class IRClassDef(IRStatement):
     name: str = ""
     bases: List[IRExpression] = field(default_factory=list)
     body: List[IRStatement] = field(default_factory=list)
+
+# --- CFG Terminators ---
+
+@dataclass
+class IRJump(IRStatement):
+    target_block_id: int = 0
+
+@dataclass
+class IRBranch(IRStatement):
+    condition: IRExpression = field(default_factory=lambda: IRLiteral(True))
+    true_block_id: int = 0
+    false_block_id: int = 0

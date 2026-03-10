@@ -1,0 +1,22 @@
+{
+  "version": "2.0",
+  "src": "src",
+  "out": "out",
+  "flags": {
+    "typed": false,
+    "fast": false,
+    "no_runtime": false,
+    "source_refs": false,
+    "compile_time": false
+  },
+  "exclude": [
+    "__pycache__",
+    "*.pyc"
+  ],
+  "folders": {
+    "workspace": "src/workspace",
+    "server": "src/server",
+    "client": "src/client",
+    "shared": "src/shared"
+  }
+}

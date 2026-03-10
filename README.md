@@ -9,20 +9,20 @@
 pip install -e ".[dev]"
 
 # Scaffold a new project
-rpy init myproject
+rpy setup myproject
 cd myproject
 
 # Transpile a file
-rpy build src/main.py out/main.lua
+rpy transpile src/main.py out/main.lua
 
 # Transpile a directory
-rpy build src/ out/
+rpy transpile src/ out/
 
-# Watch and auto-recompile
-rpy watch src/ out/
+# Live Sync (Dev Server + Watcher)
+rpy live src/ out/
 
 # Validate without writing output
-rpy check src/
+rpy validate src/
 
 # With type annotations
 rpy build src/ out/ --typed --verbose
@@ -100,14 +100,12 @@ guard:take_damage(30)
 | `--no-runtime` | Don't prepend runtime `require()` |
 | `--verbose` | Print detailed build output |
 
-## CLI Commands
-
 | Command | Description |
 |---|---|
-| `rpy build <src> <out>` | Transpile files/directories |
-| `rpy check <src>` | Validate without writing output |
-| `rpy init [dir]` | Scaffold a new RPy project |
-| `rpy watch <src> <out>` | Auto-rebuild on file changes |
+| `rpy transpile <src> <out>` | Transpile files/directories (Alias: `build`) |
+| `rpy validate <src>` | Validate without writing output (Alias: `check`) |
+| `rpy setup [dir]` | Scaffold a new RPy project (Alias: `init`) |
+| `rpy live <src> <out>` | Real-time Dev Server & Studio Sync (Alias: `watch`) |
 
 ## Project Structure
 

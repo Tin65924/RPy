@@ -47,7 +47,15 @@ class RPyLiveCoordinator:
             self.watcher.stop()
             self.watcher.join()
 
-    def handle_file_change(self, py_path: Path):
+    def handle_file_change(self, py_path: Path, deleted: bool = False):
+        # Determine logic path (relative to src)
+        rel_path = str(py_path.relative_to(self.src_dir))
+        
+        if deleted:
+            if self.server.remove_file(rel_path):
+                print(f"  - {rel_path} deleted")
+            return
+
         # Placement safety
         warning = _validate_placement(py_path, self.src_dir, {})
         if warning:
@@ -61,14 +69,10 @@ class RPyLiveCoordinator:
             
             # Optionally write to disk
             if self.flags.show_out:
-                rel = py_path.relative_to(self.src_dir)
-                lua_path = self.out_dir / rel.with_suffix(".lua")
+                lua_path = self.out_dir / py_path.relative_to(self.src_dir).with_suffix(".lua")
                 lua_path.parent.mkdir(parents=True, exist_ok=True)
                 lua_path.write_text(result.code, encoding="utf-8")
 
-            # Determine logic path (relative to src)
-            rel_path = str(py_path.relative_to(self.src_dir))
-            
             # Update server VFS
             script_type = _get_script_type(py_path)
             self.server.update_file(rel_path, result.code, script_type, latency)
