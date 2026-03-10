@@ -13,6 +13,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import asyncio
 import json
 from dataclasses import replace
 import os
@@ -33,7 +34,7 @@ from transpiler.errors import TranspileError
 # ---------------------------------------------------------------------------
 # Version
 # ---------------------------------------------------------------------------
-__version__ = "0.2.0"
+__version__ = "0.4.0"
 
 
 
@@ -393,8 +394,8 @@ def cmd_init(args: argparse.Namespace) -> int:
     print("    src/shared/  → ReplicatedStorage      (shared modules)")
     print()
     print("  Next steps:")
-    print("    rpy build src/ out/            — transpile all scripts")
-    print("    rpy watch src/ out/            — live-reload scripts")
+    print("    rpy transpile src/ out/        — transpile all scripts")
+    print("    rpy live src/ out/             — start dev server & sync to Studio")
     return 0
 
 
