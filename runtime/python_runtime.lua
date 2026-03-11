@@ -20,6 +20,65 @@
 
 local M = {}
 
+-- Initialize RPy global state and require cache
+_G.__rpy_state = _G.__rpy_state or {}
+_G.__rpy_cache = _G.__rpy_cache or {}
+
+function _G.__rpy_require(module_path)
+    if _G.__rpy_cache[module_path] then
+        return _G.__rpy_cache[module_path]
+    end
+
+    local parts = string.split(module_path, "/")
+    local root = parts[1]:lower()
+    local current
+    if root == "replicatedstorage" or root == "shared" then
+        current = game:GetService("ReplicatedStorage")
+    elseif root == "serverscriptservice" or root == "server" then
+        current = game:GetService("ServerScriptService")
+    elseif root == "starterplayerscripts" or root == "client" then
+        local sp = game:GetService("StarterPlayer")
+        current = sp:FindFirstChild("StarterPlayerScripts") or sp
+    elseif root == "workspace" then
+        current = game:GetService("Workspace")
+    elseif root == "lighting" then
+        current = game:GetService("Lighting")
+    elseif root == "startergui" then
+        current = game:GetService("StarterGui")
+    else
+        current = game:GetService("ServerStorage")
+    end
+    
+    for i = 2, #parts do
+        current = current:WaitForChild(parts[i], 5)
+        if not current then
+            error("[RPy] Could not resolve module path: " .. module_path)
+        end
+    end
+    
+    local result = require(current)
+    _G.__rpy_cache[module_path] = result
+    return result
+end
+
+-- Listen for Hot Reload events from the Studio Plugin
+task.spawn(function()
+    local rs = game:GetService("ReplicatedStorage")
+    local event = rs:FindFirstChild("RPyHotReloadEvent")
+    if not event then
+        event = Instance.new("BindableEvent")
+        event.Name = "RPyHotReloadEvent"
+        event.Parent = rs
+    end
+    
+    event.Event:Connect(function(module_path)
+        if _G.__rpy_cache[module_path] then
+            print("[RPy] Hot-Reloading Module:", module_path)
+            _G.__rpy_cache[module_path] = nil
+        end
+    end)
+end)
+
 -- ---------------------------------------------------------------------------
 -- py_bool — Python truthiness semantics
 --

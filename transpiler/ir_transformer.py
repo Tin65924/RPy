@@ -24,11 +24,26 @@ class PythonToIRTransformer(ast.NodeVisitor):
             return f"{self._get_type_str(node.value)}.{node.attr}"
         return "any"
 
-    def visit_Module(self, node: ast.Module) -> ir.IRModule:
-        return ir.IRModule(
-            lineno=1,
-            body=[self.visit(s) for s in node.body if self.visit(s) is not None]
+    def _visit_body(self, nodes: List[ast.stmt]) -> List[ir.IRStatement]:
+        results = []
+        for n in nodes:
+            res = self.visit(n)
+            if res is None: continue
+            if isinstance(res, list):
+                results.extend(res)
+            else:
+                results.append(res)
+        return results
+
+    def generic_visit(self, node: ast.AST) -> Any:
+        raise UnsupportedFeatureError(
+            node_name(node),
+            line=getattr(node, "lineno", None),
+            col=getattr(node, "col_offset", None)
         )
+
+    def visit_Module(self, node: ast.Module) -> ir.IRModule:
+        return ir.IRModule(lineno=1, body=self._visit_body(node.body))
 
     # --- Expressions ---
 
@@ -47,8 +62,6 @@ class PythonToIRTransformer(ast.NodeVisitor):
         )
 
     def visit_BinOp(self, node: ast.BinOp) -> ir.IRBinaryOperation:
-        # Note: Operators are mapped later or preserved as strings/ast types
-        # For IR we can use a more abstract representation if needed
         return ir.IRBinaryOperation(
             lineno=node.lineno,
             col_offset=node.col_offset,
@@ -56,6 +69,29 @@ class PythonToIRTransformer(ast.NodeVisitor):
             operator=type(node.op).__name__,
             right=self.visit(node.right)
         )
+
+    def visit_Compare(self, node: ast.Compare) -> ir.IRBinaryOperation:
+        # Simple implementation for single comparison
+        return ir.IRBinaryOperation(
+            lineno=node.lineno,
+            col_offset=node.col_offset,
+            left=self.visit(node.left),
+            operator=type(node.ops[0]).__name__,
+            right=self.visit(node.comparators[0])
+        )
+
+    def visit_BoolOp(self, node: ast.BoolOp) -> ir.IRBinaryOperation:
+        # x and y and z -> (x and (y and z))
+        res = self.visit(node.values[-1])
+        op_name = type(node.op).__name__
+        for i in range(len(node.values) - 2, -1, -1):
+            res = ir.IRBinaryOperation(
+                lineno=node.lineno,
+                left=self.visit(node.values[i]),
+                operator=op_name,
+                right=res
+            )
+        return res # type: ignore
 
     def visit_UnaryOp(self, node: ast.UnaryOp) -> ir.IRUnaryOperation:
         return ir.IRUnaryOperation(
@@ -112,12 +148,64 @@ class PythonToIRTransformer(ast.NodeVisitor):
             fields.append((str(kn), self.visit(v)))
         return ir.IRTableLiteral(lineno=node.lineno, col_offset=node.col_offset, fields=fields)
 
+    def visit_JoinedStr(self, node: ast.JoinedStr) -> ir.IRExpression:
+        if not node.values:
+            return ir.IRLiteral(value="", lineno=node.lineno, col_offset=node.col_offset)
+        
+        # Build a concatenation chain: (val1 .. (val2 .. val3))
+        res = self.visit(node.values[-1])
+        if isinstance(node.values[-1], ast.FormattedValue):
+            res = ir.IRFunctionCall(
+                func=ir.IRVariable(name="str"),
+                args=[res],
+                lineno=node.lineno,
+                col_offset=node.col_offset
+            )
+
+        for i in range(len(node.values) - 2, -1, -1):
+            val = self.visit(node.values[i])
+            if isinstance(node.values[i], ast.FormattedValue):
+                val = ir.IRFunctionCall(
+                    func=ir.IRVariable(name="str"),
+                    args=[val],
+                    lineno=node.lineno,
+                    col_offset=node.col_offset
+                )
+            
+            res = ir.IRBinaryOperation(
+                lineno=node.lineno,
+                left=val,
+                operator="Concat",
+                right=res
+            )
+        return res
+
+    def visit_FormattedValue(self, node: ast.FormattedValue) -> ir.IRExpression:
+        return self.visit(node.value)
+
     # --- Statements ---
 
     def visit_Assign(self, node: ast.Assign) -> ir.IRStatement:
         # Capture all targets
         ir_targets = [self.visit(t) for t in node.targets]
         ir_value = self.visit(node.value)
+        
+        # Check if the assignment is wrapped in a persistent call: x = persistent(0)
+        is_persistent = False
+        if isinstance(node.value, ast.Call) and isinstance(node.value.func, ast.Name) and node.value.func.id == "persistent":
+            is_persistent = True
+            if node.value.args:
+                ir_value = self.visit(node.value.args[0])
+            else:
+                ir_value = ir.IRLiteral(value=None)
+                
+        if is_persistent:
+            return ir.IRPersistentAssign(
+                lineno=node.lineno,
+                col_offset=node.col_offset,
+                target=ir_targets[0],
+                value=ir_value
+            )
         
         # Simple implementation for now, assuming single target (multiple assignments can be split)
         return ir.IRAssignment(
@@ -126,6 +214,47 @@ class PythonToIRTransformer(ast.NodeVisitor):
             target=ir_targets[0],
             value=ir_value,
             is_local=True # The analyzer will refine this if needed, but default to local
+        )
+        
+    def visit_AnnAssign(self, node: ast.AnnAssign) -> ir.IRStatement:
+        target = self.visit(node.target)
+        value = self.visit(node.value) if node.value else ir.IRLiteral(value=None)
+        
+        ann_str = self._get_type_str(node.annotation)
+        # We can detect x: persistent = 0
+        if ann_str == "persistent":
+            return ir.IRPersistentAssign(
+                lineno=node.lineno,
+                col_offset=node.col_offset,
+                target=target,
+                value=value
+            )
+            
+        return ir.IRAssignment(
+            lineno=node.lineno,
+            col_offset=node.col_offset,
+            target=target,
+            value=value,
+            is_local=True
+        )
+
+    def visit_AugAssign(self, node: ast.AugAssign) -> ir.IRStatement:
+        # x += 1 -> x = x + 1
+        target = self.visit(node.target)
+        value = self.visit(node.value)
+        op_name = type(node.op).__name__
+        
+        return ir.IRAssignment(
+            lineno=node.lineno,
+            col_offset=node.col_offset,
+            target=target,
+            value=ir.IRBinaryOperation(
+                lineno=node.lineno,
+                left=target,
+                operator=op_name,
+                right=value
+            ),
+            is_local=False # Usually already declared
         )
 
     def visit_Expr(self, node: ast.Expr) -> ir.IRStatement:
@@ -149,7 +278,7 @@ class PythonToIRTransformer(ast.NodeVisitor):
             args=[a.arg for a in node.args.args],
             arg_types=[self._get_type_str(a.annotation) for a in node.args.args],
             return_type=self._get_type_str(node.returns),
-            body=[self.visit(s) for s in node.body if self.visit(s) is not None],
+            body=self._visit_body(node.body),
             is_local=True
         )
 
@@ -165,8 +294,8 @@ class PythonToIRTransformer(ast.NodeVisitor):
             lineno=node.lineno,
             col_offset=node.col_offset,
             condition=self.visit(node.test),
-            then_block=[self.visit(s) for s in node.body],
-            else_block=[self.visit(s) for s in node.orelse] if node.orelse else None
+            then_block=self._visit_body(node.body),
+            else_block=self._visit_body(node.orelse) if node.orelse else None
         )
 
     def visit_While(self, node: ast.While) -> ir.IRWhileStatement:
@@ -174,7 +303,7 @@ class PythonToIRTransformer(ast.NodeVisitor):
             lineno=node.lineno,
             col_offset=node.col_offset,
             condition=self.visit(node.test),
-            body=[self.visit(s) for s in node.body]
+            body=self._visit_body(node.body)
         )
 
     def visit_For(self, node: ast.For) -> ir.IRStatement:
@@ -188,7 +317,7 @@ class PythonToIRTransformer(ast.NodeVisitor):
                 start=self.visit(start),
                 end=self.visit(stop),
                 step=self.visit(step) if step else None,
-                body=[self.visit(s) for s in node.body if self.visit(s) is not None]
+                body=self._visit_body(node.body)
             )
         
         # Generic for
@@ -203,7 +332,7 @@ class PythonToIRTransformer(ast.NodeVisitor):
             col_offset=node.col_offset,
             vars=loop_vars,
             iterator=self.visit(node.iter),
-            body=[self.visit(s) for s in node.body if self.visit(s) is not None]
+            body=self._visit_body(node.body)
         )
 
     def visit_Pass(self, node: ast.Pass) -> ir.IRPassStatement:
@@ -231,14 +360,26 @@ class PythonToIRTransformer(ast.NodeVisitor):
             col_offset=node.col_offset,
             name=node.name,
             bases=[self.visit(b) for b in node.bases if isinstance(b, (ast.Name, ast.Attribute))],
-            body=[self.visit(s) for s in node.body if self.visit(s) is not None]
+            body=self._visit_body(node.body)
         )
 
-    def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
-        # We don't really need a dedicated IR node for imports if they just setup the symbol table,
-        # but the analyzer might want to know about them.
-        # For now, we'll just skip them or return None.
-        return None
+    def visit_Import(self, node: ast.Import) -> List[ir.IRImport]:
+        return [
+            ir.IRImport(
+                lineno=node.lineno,
+                col_offset=node.col_offset,
+                module=alias.name,
+                alias=alias.asname
+            )
+            for alias in node.names
+        ]
 
-    def visit_Import(self, node: ast.Import) -> None:
-        return None
+    def visit_ImportFrom(self, node: ast.ImportFrom) -> ir.IRImportFrom:
+        return ir.IRImportFrom(
+            lineno=node.lineno,
+            col_offset=node.col_offset,
+            module=node.module or "",
+            names=[alias.name for alias in node.names],
+            aliases=[alias.asname for alias in node.names],
+            level=node.level
+        )

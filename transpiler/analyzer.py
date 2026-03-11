@@ -8,6 +8,7 @@ import os
 from typing import Dict, Optional, Set, Any
 from transpiler import ir
 from transpiler.diagnostics import manager, DiagnosticManager
+from transpiler.project_context import ProjectContext, ModuleExport
 
 class SymbolTable:
     def __init__(self, parent: Optional[SymbolTable] = None):
@@ -24,12 +25,17 @@ class SymbolTable:
     def define(self, name: str, type_name: str):
         self.symbols[name] = type_name
 
+SDK_MODULES = {"roblox", "math", "table", "string", "task", "coroutine", "debug"}
+
 class SemanticAnalyzer:
-    def __init__(self, diagnostics: Optional[DiagnosticManager] = None):
+    def __init__(self, diagnostics: Optional[DiagnosticManager] = None, project: Optional[ProjectContext] = None, module_name: str = "main"):
         self.diagnostics = diagnostics or manager
+        self.project = project
+        self.module_name = module_name
         self.metadata = self._load_metadata()
         self.symbol_table = SymbolTable()
         self._init_globals()
+        self._exports = ModuleExport(module_name)
 
     def _load_metadata(self) -> Dict[str, Any]:
         path = os.path.join(os.path.dirname(__file__), "api_metadata.json")
@@ -63,6 +69,10 @@ class SemanticAnalyzer:
     def visit_IRModule(self, node: ir.IRModule):
         for stmt in node.body:
             self.analyze(stmt)
+        
+        # After analysis, if we are in a project, update the global project context
+        if self.project:
+            self.project.modules[self.module_name] = self._exports
 
     def visit_IRAssignment(self, node: ir.IRAssignment):
         self.analyze(node.value)
@@ -75,6 +85,10 @@ class SemanticAnalyzer:
                 self.symbol_table.define(node.target.name, inferred)
                 if not node.target.inferred_type:
                     node.target.inferred_type = inferred
+                
+                # Export if we are at module level
+                if self.symbol_table.parent is None: # Toplevel
+                    self._exports.symbols[node.target.name] = inferred
         elif isinstance(node.target, ir.IRPropertyAccess):
             # Check for 'self.prop = value'
             if isinstance(node.target.receiver, ir.IRVariable) and node.target.receiver.name == "self":
@@ -87,12 +101,39 @@ class SemanticAnalyzer:
 
     def visit_IRVariable(self, node: ir.IRVariable):
         if not node.inferred_type:
-            node.inferred_type = self.symbol_table.lookup(node.name)
+            t = self.symbol_table.lookup(node.name)
+            if t:
+                node.inferred_type = t
+                if t.startswith("SDK_MEMBER:"):
+                    # Rewrite the variable name to be qualified for the generator
+                    # Actually, the generator expects a simple name for Name nodes.
+                    # We might need to transform this node into an Attribute access if we want to be clean.
+                    # But for now, if we just set inferred_type, we can handle it in visit_IRFunctionCall.
+                    pass
 
     def visit_IRFunctionCall(self, node: ir.IRFunctionCall):
         self.analyze(node.func)
         for arg in node.args:
             self.analyze(arg)
+        
+        # Handle SDK member calls (e.g., from string import upper -> upper("..."))
+        if isinstance(node.func, ir.IRVariable) and node.func.inferred_type:
+            if node.func.inferred_type.startswith("SDK_MEMBER:"):
+                qualified = node.func.inferred_type[11:]
+                if "." in qualified:
+                    mod, member = qualified.split(".", 1)
+                    # Transform this function call into a method call (qualified library call)
+                    # We can't easily replace 'node' itself in a visitor, but we can 
+                    # change its 'func' to an Attribute if we had that in IR.
+                    # In RPy IR, we have IRPropertyAccess.
+                    # Let's change node.func to an IRPropertyAccess.
+                    node.func = ir.IRPropertyAccess(
+                        receiver=ir.IRVariable(name=mod, lineno=node.lineno, col_offset=node.col_offset),
+                        property=member,
+                        lineno=node.lineno,
+                        col_offset=node.col_offset
+                    )
+
         if not node.inferred_type:
             node.inferred_type = self._infer_type(node)
 
@@ -105,6 +146,18 @@ class SemanticAnalyzer:
         node.call_style = ir.CallStyle.COLON # Default
 
         if receiver_type:
+            if receiver_type.startswith("Module:"):
+                node.call_style = ir.CallStyle.DOT # Modules use dots
+                # Infer return type from module exports
+                mod_name = receiver_type[7:]
+                if self.project:
+                    mod_export = self.project.modules.get(mod_name)
+                    if mod_export:
+                        t = mod_export.symbols.get(node.method)
+                        if t and t.startswith("Function:"):
+                            node.inferred_type = t[9:]
+                return
+
             class_info = self._get_class_info(receiver_type)
             if class_info:
                 method_info = class_info.get("methods", {}).get(node.method)
@@ -115,11 +168,74 @@ class SemanticAnalyzer:
                     node.inferred_type = method_info.get("returns")
                     return
 
+    def visit_IRImport(self, node: ir.IRImport):
+        if node.module in SDK_MODULES:
+            # e.g., import math -> math is a module
+            self.symbol_table.define(node.alias or node.module, f"Module:{node.module}")
+            return
+
+        if self.project:
+            # We don't perform deep analysis here, just define the module name in symbol table
+            self.symbol_table.define(node.alias or node.module, f"Module:{node.module}")
+
+    def visit_IRImportFrom(self, node: ir.IRImportFrom):
+        if node.module == "roblox":
+            for i, name in enumerate(node.names):
+                alias = node.aliases[i] or name
+                # e.g., from roblox import task -> task is a module/global
+                if name in SDK_MODULES:
+                    self.symbol_table.define(alias, f"Module:{name}")
+                else:
+                    self.symbol_table.define(alias, "any")
+            return
+
+        if node.module in SDK_MODULES:
+            for i, name in enumerate(node.names):
+                alias = node.aliases[i] or name
+                # e.g., from math import floor -> floor is a member of math
+                self.symbol_table.define(alias, f"SDK_MEMBER:{node.module}.{name}")
+            return
+
+        if self.project:
+            mod_export = self.project.modules.get(node.module)
+            if mod_export:
+                for i, name in enumerate(node.names):
+                    alias = node.aliases[i] or name
+                    t = mod_export.symbols.get(name, "any")
+                    self.symbol_table.define(alias, t)
+            else:
+                self.diagnostics.warning(
+                    f"Module '{node.module}' not found in project or not yet analyzed.",
+                    line=node.lineno, col=node.col_offset
+                )
+
     def visit_IRPropertyAccess(self, node: ir.IRPropertyAccess):
         self.analyze(node.receiver)
         receiver_type = self._infer_type(node.receiver)
         
         if not receiver_type or receiver_type == "any":
+            return
+
+        # --- Module Access Fallback ---
+        if receiver_type.startswith("Module:"):
+            mod_name = receiver_type[7:]
+            if self.project:
+                mod_export = self.project.modules.get(mod_name)
+                if mod_export:
+                    t = mod_export.symbols.get(node.property)
+                    if t:
+                        node.inferred_type = t
+                        return
+            
+            if mod_name in SDK_MODULES:
+                # For SDK modules, we assume the property exists for now
+                node.inferred_type = "any"
+                return
+
+            self.diagnostics.error(
+                f"Module '{mod_name}' has no attribute '{node.property}'.",
+                line=node.lineno, col=node.col_offset
+            )
             return
 
         is_optional = receiver_type.endswith("?")
@@ -134,13 +250,18 @@ class SemanticAnalyzer:
 
         class_info = self._get_class_info(base_type)
         if class_info:
-            # Check properties
             props = class_info.get("properties", {})
             prop_type = props.get(node.property)
             if prop_type:
                 node.inferred_type = prop_type
                 return
-                
+            
+            # --- Service Fallback for DataModel ---
+            if base_type == "DataModel":
+                if node.property in self.metadata.get("classes", {}):
+                    node.inferred_type = node.property
+                    return
+
             # Check signals
             signals = class_info.get("signals", {})
             signal_type = signals.get(node.property)
@@ -202,6 +323,9 @@ class SemanticAnalyzer:
         self.symbol_table = old_table
         if node.name:
             self.symbol_table.define(node.name, f"Function:{node.return_type}")
+            # Export if we are at module level
+            if self.symbol_table.parent is None:
+                self._exports.symbols[node.name] = f"Function:{node.return_type}"
 
     def visit_IRGenericForStatement(self, node: ir.IRGenericForStatement):
         self.analyze(node.iterator)
@@ -314,6 +438,6 @@ class SemanticAnalyzer:
                 return merged
         return info
 
-def analyze(module: ir.IRModule, diagnostics: Optional[DiagnosticManager] = None):
-    analyzer = SemanticAnalyzer(diagnostics)
+def analyze(module: ir.IRModule, diagnostics: Optional[DiagnosticManager] = None, project: Optional[ProjectContext] = None, module_name: str = "main"):
+    analyzer = SemanticAnalyzer(diagnostics, project, module_name)
     analyzer.analyze(module)

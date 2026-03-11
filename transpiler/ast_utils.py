@@ -99,9 +99,9 @@ def unpack_range_args(
     """
     Given a confirmed range() Call node, return (start, stop, step).
 
-    range(n)       → (Constant(0), n,    None)
-    range(a, b)    → (a,           b,    None)
-    range(a, b, c) → (a,           b,    c)
+    range(n)       -> (Constant(0), n,    None)
+    range(a, b)    -> (a,           b,    None)
+    range(a, b, c) -> (a,           b,    c)
     """
     args = call.args
     zero = ast.Constant(value=0)
@@ -180,7 +180,7 @@ def _bool_trivially_safe(node: ast.AST) -> bool:
     Safe cases:
       - bool / None constants         (same in both languages)
       - int/float non-zero literals   (both languages agree these are truthy)
-        * 0 and 0.0 differ: Python → False, Lua → true, so they still need shim
+        * 0 and 0.0 differ: Python -> False, Lua -> true, so they still need shim
       - Comparison results            (always produce a boolean)
       - BoolOp (and/or) results       (result is one of the operands)
       - UnaryOp(Not)                  (result is always a Lua boolean)

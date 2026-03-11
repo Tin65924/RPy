@@ -24,7 +24,8 @@ class IRToLuauGenerator:
         self.flags = flags
         self.runtime_used = set()
 
-    def generate(self, module: ir.IRModule) -> last.Block:
+    def generate(self, module: ir.IRModule, module_name: str = "unknown_module") -> last.Block:
+        self.module_name = module_name
         return self.visit(module)
 
     def visit(self, node: ir.IRNode) -> Any:
@@ -61,7 +62,8 @@ class IRToLuauGenerator:
             "Add": "+", "Sub": "-", "Mult": "*", "Div": "/",
             "Mod": "%", "Pow": "^", "BitAnd": "&", "BitOr": "|",
             "BitXor": "~", "LShift": "<<", "RShift": ">>", "Eq": "==",
-            "NotEq": "~=", "Lt": "<", "LtE": "<=", "Gt": ">", "GtE": ">=", "And": "and", "Or": "or"
+            "NotEq": "~=", "Lt": "<", "LtE": "<=", "Gt": ">", "GtE": ">=", "And": "and", "Or": "or",
+            "Concat": ".."
         }
         luau_op = op_map.get(node.operator, node.operator)
         return last.BinaryOperation(
@@ -139,21 +141,56 @@ class IRToLuauGenerator:
         
         return last.Assignment(target=target, value=value)
 
+    def visit_IRPersistentAssign(self, node: ir.IRPersistentAssign) -> last.Statement:
+        target = self.visit(node.target)
+        value = self.visit(node.value)
+        
+        # Ensure it's a simple variable assignment
+        if not isinstance(target, last.Variable):
+            return last.Assignment(target=target, value=value)
+            
+        var_name = target.name
+        self._declared_vars.add(var_name)
+        
+        # We need a unique stable key for this variable: module_name:var_name
+        import hashlib
+        module_name = getattr(self, "module_name", "unknown_module")
+        state_key = f"{module_name}:{var_name}"
+        hash_key = hashlib.md5(state_key.encode()).hexdigest()[:8]
+        full_key = f"{var_name}_{hash_key}"
+        
+        results = []
+        # _G.__rpy_state = _G.__rpy_state or {}
+        results.append(last.Assignment(
+            target=last.Variable("_G.__rpy_state"),
+            value=last.BinaryOperation(left=last.Variable("_G.__rpy_state"), operator="or", right=last.TableLiteral())
+        ))
+        
+        # local var = _G.__rpy_state["key"] or value
+        state_acc = last.IndexOperation(receiver=last.Variable("_G.__rpy_state"), index=last.Literal(full_key))
+        init_val = last.BinaryOperation(left=state_acc, operator="or", right=value)
+        results.append(last.LocalAssign(name=var_name, value=init_val))
+        
+        # _G.__rpy_state["key"] = var
+        results.append(last.Assignment(target=state_acc, value=target))
+        
+        return last.Block(results)
+
     def visit_IRFunctionDef(self, node: ir.IRFunctionDef) -> last.Node:
-        if not node.name:
-            # Anonymous function (Lambda)
-            return last.Lambda(
-                args=node.args,
-                body=self._visit_block(node.body),
-                arg_types=node.arg_types if self.flags.typed else [],
-                return_type=node.return_type if self.flags.typed else None
-            )
         return last.FunctionDef(
             name=node.name,
             args=node.args,
             body=self._visit_block(node.body),
             is_local=node.is_local,
             is_method=node.is_method,
+            arg_types=node.arg_types if self.flags.typed else [],
+            return_type=node.return_type if self.flags.typed else None
+        )
+
+    def visit_IRLambda(self, node: ir.IRLambda) -> last.Lambda:
+        return last.Lambda(
+            args=node.args,
+            body=self._visit_block(node.body),
             arg_types=node.arg_types if self.flags.typed else [],
             return_type=node.return_type if self.flags.typed else None
         )
@@ -244,6 +281,57 @@ class IRToLuauGenerator:
     def visit_IRComment(self, node: ir.IRComment) -> last.Comment:
         return last.Comment(text=node.text)
 
+    def visit_IRImport(self, node: ir.IRImport) -> last.Statement:
+        # Example: import module_foo as foo
+        # Luau: local foo = _G.__rpy_require("workspace/module_foo")
+        
+        # We need absolute string path relative to project root
+        # In Python: import serverscriptservice.main -> "serverscriptservice/main"
+        module_path = node.module.replace(".", "/")
+        alias_name = node.alias or node.module.split(".")[-1]
+        
+        # Build requirement call
+        req_call = last.FunctionCall(
+            func=last.Variable("_G.__rpy_require" if not self.flags.shared_runtime else "require"),
+            args=[last.Literal(module_path)]
+        )
+        return last.LocalAssign(name=alias_name, value=req_call)
+
+    def visit_IRImportFrom(self, node: ir.IRImportFrom) -> last.Statement:
+        # Example: from x.y import z as w
+        # Luau: local _mod = _G.__rpy_require("x/y"); local w = _mod.z
+        
+        # Resolve to a normalized string path. The dependency graph handles
+        # relative imports mapping to disk, but `generator.py` needs to emit
+        # the absolute string path relative to the active Roblox roots.
+        
+        # If the emitter is currently in `workspace/scripts/test.py`
+        # and has `from .. import config`, `node.module` comes directly
+        # from the IR. The parser should already have normalized it, but we
+        # ensure it's a flat absolute '/' path for `__rpy_require`. 
+        module_path = node.module.replace(".", "/")
+        
+        results = []
+        mod_var = f"_module_{node.module.replace('.', '_')}"
+        
+        # Require the module once
+        req_call = last.FunctionCall(
+            func=last.Variable("_G.__rpy_require" if not self.flags.shared_runtime else "require"),
+            args=[last.Literal(module_path)]
+        )
+        results.append(last.LocalAssign(name=mod_var, value=req_call))
+        
+        # Extract imported names
+        for i, name in enumerate(node.names):
+            alias = node.aliases[i] or name
+            prop_acc = last.IndexOperation(
+                receiver=last.Variable(mod_var),
+                index=last.Literal(name)
+            )
+            results.append(last.LocalAssign(name=alias, value=prop_acc))
+            
+        return last.Block(results)
+
     def generic_visit(self, node: ir.IRNode) -> Any:
         raise UnsupportedFeatureError(f"Node {type(node).__name__} unsupported in Luau generation")
 
@@ -251,9 +339,9 @@ class IRToLuauGenerator:
         printer = LuauPrinter()
         return printer.print_node(node)
 
-def generate(result: TransformResult, flags: CompilerFlags) -> GenerateResult:
+def generate(result: TransformResult, flags: CompilerFlags, module_name: str = "unknown_module") -> GenerateResult:
     gen = IRToLuauGenerator(flags)
-    luau_ast = gen.generate(result.ir_module)
+    luau_ast = gen.generate(result.ir_module, module_name)
     printer = LuauPrinter()
     code = printer.print_node(luau_ast)
     

@@ -18,6 +18,7 @@ from transpiler.flags import CompilerFlags
 from transpiler.errors import UnsupportedFeatureError
 from transpiler.ast_utils import get_line
 from transpiler.ir_optimizer import optimize_ir
+from transpiler.linter import lint_ir
 from transpiler.cache_manager import cache
 
 @dataclass
@@ -74,28 +75,35 @@ class _CompileTimeEvaluator(ast.NodeTransformer):
 # --- Pass 3: Annotation Stripper ---
 class _AnnotationStripper(ast.NodeTransformer):
     """Removes type annotations from Python code before IR conversion."""
-    def visit_AnnAssign(self, node: ast.AnnAssign) -> Optional[ast.Assign]:
+    def visit_AnnAssign(self, node: ast.AnnAssign) -> Optional[ast.AST]:
+        if getattr(node.annotation, "id", None) == "persistent":
+            return node
         if node.value is None: return None
         assign = ast.Assign(targets=[node.target], value=node.value, lineno=node.lineno, col_offset=node.col_offset)
         return self.generic_visit(assign)
 
-def transform(tree: ast.Module, filename: str | None = None, flags: CompilerFlags | None = None) -> TransformResult:
+from transpiler.project_context import ProjectContext
+
+def transform(
+    tree: ast.Module, 
+    filename: str | None = None, 
+    flags: CompilerFlags | None = None,
+    project: Optional[ProjectContext] = None,
+    module_name: str = "main"
+) -> TransformResult:
     """
     Full Semantic Compilation Pipeline:
     1. Python AST Passes (Desugaring, Stripping)
     2. Python AST -> IR Transformation
     3. Semantic Analysis on IR
     """
-    # Pass 0: Match Lowering (Skipped for brevity, but integrated in full)
-    
-    # Pass 0.1: Compile-time Eval
-    # (Simplified for now, in a full impl we'd handle eval before hashing if needed)
-    
-    # Try cache
+    # ... (skipping unchanged pass logic) ...
+    # Try cache (disabled for project analysis to ensure propagation)
     source_str = ast.unparse(tree)
-    cached_ir = cache.get_cached_ir(source_str)
-    if cached_ir:
-        return TransformResult(ir_module=cached_ir, filename=filename)
+    if not project:
+        cached_ir = cache.get_cached_ir(source_str)
+        if cached_ir:
+            return TransformResult(ir_module=cached_ir, filename=filename)
 
     # Pass 3: Annotation Stripping
     stripper = _AnnotationStripper()
@@ -107,7 +115,34 @@ def transform(tree: ast.Module, filename: str | None = None, flags: CompilerFlag
     ir_module = transformer.transform(tree)
 
     # Stage 3: Semantic Analysis
-    analyze(ir_module)
+    analyze(ir_module, project=project, module_name=module_name)
+
+    # Phase 6: Escape Analysis
+    from transpiler.escape_analysis import EscapeAnalyzer
+    esc_analyzer = EscapeAnalyzer()
+    esc_analyzer.analyze_module(ir_module)
+    # Store escape analyzer globally/on module for downstream passes (e.g. SRA) to use
+    ir_module.escape_analyzer = esc_analyzer
+
+    # Stage 17: Roblox Rule Engine (Linter)
+    lint_ir(ir_module)
+
+    # Stage 4: Logical Optimizations (Stage 16)
+    optimize_ir(ir_module)
+    
+    # Phase 6: Escape Analysis Optimizations (Must happen after logical optimizations simplify the tree)
+    from transpiler.sra import SRAPass
+    from transpiler.closure_opt import ClosureEliminationPass
+    
+    sra_pass = SRAPass(esc_analyzer)
+    for i, stmt in enumerate(ir_module.body):
+        if isinstance(stmt, ir.IRFunctionDef):
+            stmt.body = sra_pass.optimize_block(stmt.body)
+            
+    clo_pass = ClosureEliminationPass(esc_analyzer)
+    for i, stmt in enumerate(ir_module.body):
+        if isinstance(stmt, ir.IRFunctionDef):
+            stmt.body = clo_pass.optimize_block(stmt.body)
     
     # Cache the result
     cache.save_ir(source_str, ir_module)

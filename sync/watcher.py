@@ -17,8 +17,11 @@ class RPyWatcher(FileSystemEventHandler):
         path = Path(event.src_path)
         name = path.name
         
-        # Filtering for transient editor files
-        if name.startswith(".") or name.endswith("~") or name.endswith(".tmp") or name.endswith(".swp") or name.endswith(".pyc") or "__pycache__" in str(path):
+        # Filtering for transient editor files and internal RPy/tool directories
+        str_path = str(path)
+        if name.startswith(".") or name.endswith("~") or name.endswith(".tmp") or \
+           name.endswith(".swp") or name.endswith(".pyc") or "__pycache__" in str_path or \
+           ".rpy" in str_path or "tools" in str_path:
             return
             
         if not name.endswith(".py"):

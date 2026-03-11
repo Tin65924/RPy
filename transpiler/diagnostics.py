@@ -22,15 +22,24 @@ class Diagnostic:
     hint: Optional[str] = None
 
 class DiagnosticManager:
-    def __init__(self):
+    def __init__(self, silent: bool = False):
         self.diagnostics: List[Diagnostic] = []
+        self.silent = silent
+
+    def clear(self):
+        self.diagnostics = []
 
     def report(self, message: str, severity: Severity, line: Optional[int] = None, 
                col: Optional[int] = None, filename: Optional[str] = None, hint: Optional[str] = None):
         diag = Diagnostic(message, severity, line, col, filename, hint)
         self.diagnostics.append(diag)
-        # For now, print immediately to terminal for visibility, but store for later aggregation
-        print(self._format(diag))
+        if not self.silent:
+            formatted = self._format(diag)
+            try:
+                print(formatted)
+            except UnicodeEncodeError:
+                # Fallback for terminals that don't support the characters (common on Windows)
+                print(formatted.encode('ascii', errors='replace').decode('ascii'))
 
     def error(self, message: str, line: Optional[int] = None, col: Optional[int] = None, filename: Optional[str] = None, hint: Optional[str] = None):
         self.report(message, Severity.ERROR, line, col, filename, hint)

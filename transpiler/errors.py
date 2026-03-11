@@ -161,3 +161,22 @@ class InternalError(TranspileError):
             f"[InternalError] {location}: {self.message}\n"
             f"  Hint: {self.hint}"
         )
+
+
+class CyclicDependencyError(TranspileError):
+    """
+    Raised when a circular import is detected in the dependency graph.
+    RPy requires the project graph to be a strict Directed Acyclic Graph (DAG).
+    """
+
+    def __init__(self, cycle_path: list[str]) -> None:
+        self.cycle_path = cycle_path
+        path_str = " -> ".join(cycle_path)
+        super().__init__(
+            message=f"Circular import detected:\n  {path_str}",
+            hint="Refactor modules to remove the mutual dependency.",
+        )
+
+    def __str__(self) -> str:
+        return f"[CyclicDependencyError] {self.message}\n  Hint: {self.hint}"
+

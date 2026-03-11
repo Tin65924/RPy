@@ -1,6 +1,11 @@
 import contextlib
 import subprocess
 import ast
+import json
+import sys
+import os
+import importlib.util
+from typing import Any
 
 def execute_macro(node: ast.Call, file_path: str | None) -> Any:
     """Invokes the current file as a script to run the compile-time function."""

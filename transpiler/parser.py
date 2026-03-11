@@ -1,5 +1,5 @@
 """
-transpiler/parser.py — Python source → ast.Module wrapper.
+transpiler/parser.py — Python source -> ast.Module wrapper.
 
 Responsibilities:
   - Call ast.parse() with proper error handling

@@ -6,10 +6,10 @@ expressions with inferred Luau types. The generator then uses these
 annotations to emit typed Luau (`local x: number = 5`).
 
 Type inference strategy (intentionally simple for v1):
-  1. Constant propagation: literals → their type
-  2. BinOp propagation: number op number → number, string .. string → string
+  1. Constant propagation: literals -> their type
+  2. BinOp propagation: number op number -> number, string .. string -> string
   3. Function return types: inferred from return statements
-  4. Everything unknown → any
+  4. Everything unknown -> any
 
 Supported Luau types: number, string, boolean, nil, any, {[any]: any}
 """
@@ -49,12 +49,12 @@ ENUM_ITEM     = "EnumItem"
 @dataclass
 class TypeMap:
     """
-    Maps (name, depth) → inferred Luau type string.
+    Maps (name, depth) -> inferred Luau type string.
     Also maps AST node id → inferred type for expressions.
     """
     _var_types: dict[tuple[str, int], str] = field(default_factory=dict)
     _expr_types: dict[int, str] = field(default_factory=dict)
-    _return_types: dict[str, str] = field(default_factory=dict)  # func_name → return type
+    _return_types: dict[str, str] = field(default_factory=dict)  # func_name -> return type
 
     def set_var(self, name: str, depth: int, luau_type: str) -> None:
         self._var_types[(name, depth)] = luau_type

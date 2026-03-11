@@ -192,5 +192,33 @@ class LuauPrinter:
     def visit_Comment(self, node: last.Comment) -> str:
         return f"-- {node.text}"
 
+    def _classify_stmt(self, stmt: Any) -> str:
+        """Classifies a statement for visual grouping in the output."""
+        if isinstance(stmt, (last.LocalAssign, last.Assignment)):
+            return "DECL"
+        if isinstance(stmt, last.FunctionDef):
+            return "FUNC"
+        if isinstance(stmt, (last.IfStatement, last.WhileStatement, last.ForStatement, last.GenericForStatement)):
+            return "LOGIC"
+        if isinstance(stmt, (last.FunctionCall, last.MethodCall, last.ReturnStatement, last.BreakStatement, last.ContinueStatement)):
+            return "EXEC"
+        if isinstance(stmt, last.Comment):
+            # Try to keep comments with the code they describe
+            return "COMMENT"
+        return "MISC"
+
     def visit_Block(self, node: last.Block) -> str:
-        return "\n".join(self.visit(s) for s in node.body)
+        lines = []
+        prev_kind = None
+        for stmt in node.body:
+            kind = self._classify_stmt(stmt)
+            # Add a blank line when switching kinds, except for certain cases
+            if prev_kind and kind != prev_kind:
+                # Don't add blank lines before comments if they follow declarations
+                if not (kind == "COMMENT" and prev_kind == "DECL"):
+                    lines.append("")
+            
+            lines.append(self.visit(stmt))
+            prev_kind = kind
+            
+        return "\n".join(lines)

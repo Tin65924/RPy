@@ -48,36 +48,59 @@ class RPyLiveCoordinator:
             self.watcher.join()
 
     def handle_file_change(self, py_path: Path, deleted: bool = False):
-        # Determine logic path (relative to src)
-        rel_path = str(py_path.relative_to(self.src_dir))
-        
         if deleted:
+            rel_path = str(py_path.relative_to(self.src_dir))
             if self.server.remove_file(rel_path):
                 print(f"  - {rel_path} deleted")
             return
 
-        # Placement safety
+        from transpiler.dependency_graph import DependencyGraph
+        from cli.main import _get_project_folders
+        valid_roots = list(_get_project_folders(self.server.config).keys())
+        graph = DependencyGraph(str(self.src_dir), valid_roots=valid_roots)
+        try:
+            graph.scan_project()
+        except TranspileError as e:
+            print(f"  ⚠ DAG validation error: {e}")
+
+        visited = set()
+        to_sync = [py_path]
+        
+        while to_sync:
+            curr_path = to_sync.pop(0)
+            if curr_path in visited: continue
+            visited.add(curr_path)
+            
+            # Add dependents
+            for dep in graph.reverse_graph.get(curr_path, []):
+                if dep not in visited and dep not in to_sync:
+                    to_sync.append(dep)
+                    
+            self._sync_single_file(curr_path, is_dependency=(curr_path != py_path))
+
+    def _sync_single_file(self, py_path: Path, is_dependency: bool = False):
+        rel_path = str(py_path.relative_to(self.src_dir))
         warning = _validate_placement(py_path, self.src_dir, {})
-        if warning:
+        if warning and not is_dependency:
             print(f"  ⚠ {warning}")
 
         start_time = time.time()
         try:
-            # Transpile
+            from cli.main import transpile_file
+            # Note: transpile_file expects flags, we pass self.flags
             result = transpile_file(py_path, self.flags)
             latency = (time.time() - start_time) * 1000 # ms
             
-            # Optionally write to disk
             if self.flags.show_out:
                 lua_path = self.out_dir / py_path.relative_to(self.src_dir).with_suffix(".lua")
                 lua_path.parent.mkdir(parents=True, exist_ok=True)
                 lua_path.write_text(result.code, encoding="utf-8")
 
-            # Update server VFS
             script_type = _get_script_type(py_path)
             self.server.update_file(rel_path, result.code, script_type, latency)
             
-            print(f"  ✓ {rel_path} synced ({latency:.1f}ms)")
+            prefix = "  ↻" if is_dependency else "  ✓"
+            print(f"{prefix} {rel_path} synced ({latency:.1f}ms)")
             
         except TranspileError as e:
             print(f"  ✗ {py_path.name}: {e}")
@@ -89,7 +112,7 @@ class RPyLiveCoordinator:
         for py_file in py_files:
             if py_file.name == "__init__.py" or "__pycache__" in str(py_file):
                 continue
-            self.handle_file_change(py_file)
+            self._sync_single_file(py_file)
 
 async def start_live_sync(src: Path, out: Path, flags: CompilerFlags):
     coordinator = RPyLiveCoordinator(src, out, flags)

@@ -95,21 +95,40 @@ end)
 local isSyncing = false
 local lastEventId = 0
 
+local SERVICE_MAP = {
+    workspace = game.Workspace,
+    replicatedstorage = game:GetService("ReplicatedStorage"),
+    serverscriptservice = game:GetService("ServerScriptService"),
+    starterplayerscripts = game:GetService("StarterPlayer"):FindFirstChild("StarterPlayerScripts") or game:GetService("StarterPlayer"),
+    lighting = game:GetService("Lighting"),
+    startergui = game:GetService("StarterGui"),
+}
+
 local function getContainerForPath(relPath)
-    -- Simplified folder mapping. In production, this would read rpy.json folders.
-    relPath = relPath:lower()
-    if relPath:find("^server/") or relPath:find("serverscriptservice") then
-        return game:GetService("ServerScriptService")
-    elseif relPath:find("^client/") or relPath:find("starterplayer") then
+    relPath = relPath:gsub("\\", "/"):lower()
+    local segments = string.split(relPath, "/")
+    local root = segments[1]
+    
+    if SERVICE_MAP[root] then
+        return SERVICE_MAP[root]
+    end
+    
+    -- Backward compatibility for v1.0 structures
+    if root == "server" then return game:GetService("ServerScriptService") end
+    if root == "client" then 
         local sp = game:GetService("StarterPlayer")
         return sp:FindFirstChild("StarterPlayerScripts") or sp
-    elseif relPath:find("^shared/") or relPath:find("replicatedstorage") then
-        return game:GetService("ReplicatedStorage")
-    elseif relPath:find("^workspace/") then
-        return game.Workspace
     end
-    -- Default to ServerStorage for unknown mappings
-    return game:GetService("ServerStorage")
+    if root == "shared" then return game:GetService("ReplicatedStorage") end
+
+    -- Default to ServerStorage/RPyUnknown for isolation
+    local unknownRoot = game:GetService("ServerStorage"):FindFirstChild("RPyUnknown")
+    if not unknownRoot then
+        unknownRoot = Instance.new("Folder")
+        unknownRoot.Name = "RPyUnknown"
+        unknownRoot.Parent = game:GetService("ServerStorage")
+    end
+    return unknownRoot
 end
 
 local function syncFile(path, event, config)
@@ -183,6 +202,19 @@ local function syncFile(path, event, config)
         if existing.ClassName ~= className then
             existing:Destroy()
             scriptObj = nil
+        elseif className == "ModuleScript" then
+            scriptObj = existing:Clone()
+            existing:Destroy()
+            scriptObj.Parent = parent
+            
+            -- Notify game runtime VM of hot reload
+            local rs = game:GetService("ReplicatedStorage")
+            local ev = rs:FindFirstChild("RPyHotReloadEvent")
+            if ev and ev:IsA("BindableEvent") then
+                local module_path = path:gsub("%.[pylua]+$", ""):gsub("\\", "/")
+                ev:Fire(module_path)
+                ev:Fire(module_path:gsub("/", "."))
+            end
         end
     end
     

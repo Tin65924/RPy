@@ -31,6 +31,7 @@ class IRLiteral(IRExpression):
 @dataclass
 class IRVariable(IRExpression):
     name: str = ""
+    original_name: Optional[str] = None # Used for SSA renaming
 
 @dataclass
 class IRBinaryOperation(IRExpression):
@@ -70,6 +71,11 @@ class IRIndexOperation(IRExpression):
     receiver: IRExpression = field(default_factory=lambda: IRVariable())
     index: IRExpression = field(default_factory=lambda: IRLiteral())
 
+@dataclass
+class IRPhi(IRExpression):
+    # block_id -> versioned variable or expression
+    options: Dict[int, IRExpression] = field(default_factory=dict)
+
 # --- Statements ---
 
 @dataclass
@@ -85,6 +91,11 @@ class IRAssignment(IRStatement):
     target: IRExpression = field(default_factory=lambda: IRVariable())
     value: IRExpression = field(default_factory=lambda: IRLiteral())
     is_local: bool = False
+
+@dataclass
+class IRPersistentAssign(IRStatement):
+    target: IRExpression = field(default_factory=lambda: IRVariable())
+    value: IRExpression = field(default_factory=lambda: IRLiteral())
 
 @dataclass
 class IRFunctionDef(IRStatement):
@@ -156,6 +167,18 @@ class IRClassDef(IRStatement):
     bases: List[IRExpression] = field(default_factory=list)
     body: List[IRStatement] = field(default_factory=list)
     properties: Dict[str, str] = field(default_factory=dict)
+
+@dataclass
+class IRImport(IRStatement):
+    module: str = ""
+    alias: Optional[str] = None
+
+@dataclass
+class IRImportFrom(IRStatement):
+    module: str = ""
+    names: List[str] = field(default_factory=list)
+    aliases: List[Optional[str]] = field(default_factory=list)
+    level: int = 0
 
 # --- CFG Terminators ---
 

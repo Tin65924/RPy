@@ -77,19 +77,20 @@ local guard = NPC.new("Guard", 100)
 guard:take_damage(30)
 ```
 
-## Supported Python Subset (v1)
+## Supported Python Subset (v1.0.0)
 
-- Variables, arithmetic, comparisons
-- `if` / `elif` / `else`
-- `while`, `for i in range(...)`
-- Functions (`def`, `return`, `lambda`, `*args`)
-- Lists, dicts, tuples with 30+ method remaps
-- List/dict comprehensions
-- Classes (single inheritance, metatable OOP)
-- Exceptions (`try` / `except` / `finally` / `raise`)
-- f-strings with format specs
-- `with` statement (body-only)
-- `from roblox import ...` (Roblox SDK stubs)
+- **Variables & Logic**: Full support for variables, arithmetic, logical comparisons, and ternary operators.
+- **Control Flow**: `if` / `elif` / `else`, `while`, and specialized `for i in range()` loops.
+- **Functions**: Support for `def`, `return`, `lambda`, and `*args`.
+- **Data Structures**: Lists, Dicts, and Tuples with 40+ method remaps to Luau's `table` library.
+- **Async & Task**: Built-in `task` module support for `task.wait()`, `task.spawn()`, and `task.delay()`.
+- **Standard Library**: Native mapping for `math`, `string`, `table`, `coroutine`, and `debug` libraries.
+- **Roblox SDK**: Integrated `roblox` stubs for 100+ services and classes with autocompletion support.
+- **Modern OOP**: Single inheritance classes with metatable-based state management.
+- **Error Handling**: Full `try` / `except` / `finally` blocks transpiled to Luau `pcall`.
+- **Package Management**: Native Wally integration via `rpy install` for Luau dependencies.
+- **Intelligence Layer**: Fuzzy property suggestions, flow-sensitive type refinement, and nil-safety diagnostics.
+- **Advanced Performance**: Compile-time macros (`@compile_time`), Recursive DCE, CSE, and LICM optimizations.
 
 ## Compiler Flags
 
@@ -98,6 +99,8 @@ guard:take_damage(30)
 | `--typed` | Emit Luau type annotations (`local x: number = 5`) |
 | `--fast` | Skip `py_bool()` truthiness shim (Lua semantics) |
 | `--no-runtime` | Don't prepend runtime `require()` |
+| `--compile-time` | Enable build-time Python execution (Macros) |
+| `--debug` | Enable detailed diagnostic logging |
 | `--verbose` | Print detailed build output |
 
 | Command | Description |
